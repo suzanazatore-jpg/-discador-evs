@@ -1,5 +1,7 @@
 import { supabaseAdmin } from '@/lib/supabase';
 
+export const dynamic = 'force-dynamic';
+
 // Puxa a fila de leads pra ligar (view v_fila).
 export async function GET() {
   const { data, error } = await supabaseAdmin
