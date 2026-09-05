@@ -1,8 +1,0 @@
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: 'Inter', system-ui, sans-serif;
-  background: #FBF6EF;
-  color: #2A1418;
-}
-button { font-family: inherit; cursor: pointer; }
-textarea { font-family: inherit; }
