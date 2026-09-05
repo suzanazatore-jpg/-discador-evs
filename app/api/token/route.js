@@ -1,5 +1,7 @@
 import twilio from 'twilio';
 
+export const dynamic = 'force-dynamic';
+
 // Gera o token que autoriza o navegador da vendedora a ligar.
 export async function GET() {
   const AccessToken = twilio.jwt.AccessToken;
