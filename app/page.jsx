@@ -18,6 +18,23 @@ const RESULTADOS = [
 
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
+async function obterToken() {
+  const response = await fetch('/api/token', { cache: 'no-store' });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok || !body.token) {
+    throw new Error(body.error || 'O servidor não conseguiu gerar o token do Twilio.');
+  }
+
+  return body.token;
+}
+
+function mensagemErro(error, fallback) {
+  if (!error) return fallback;
+  const code = error.code ? `[${error.code}] ` : '';
+  return `${code}${error.message || error.description || fallback}`;
+}
+
 export default function DiscadorEVS() {
   const [leads, setLeads] = useState([]);
   const [idx, setIdx] = useState(0);
@@ -36,23 +53,68 @@ export default function DiscadorEVS() {
 
   // Carrega a fila + inicializa o Twilio Device
   useEffect(() => {
+    let desmontado = false;
+    let device = null;
+
     (async () => {
       try {
-        const r = await fetch('/api/fila');
+        const r = await fetch('/api/fila', { cache: 'no-store' });
         const j = await r.json();
+
+        if (!r.ok || j.error) {
+          throw new Error(j.error || 'Falha ao carregar a fila.');
+        }
+
         setLeads(j.leads || []);
-      } catch (e) { setErro('Falha ao carregar a fila.'); }
+      } catch (e) {
+        setErro(mensagemErro(e, 'Falha ao carregar a fila.'));
+      }
 
       try {
-        const rt = await fetch('/api/token');
-        const jt = await rt.json();
+        const token = await obterToken();
         const { Device } = await import('@twilio/voice-sdk');
-        const device = new Device(jt.token, { codecPreferences: ['opus', 'pcmu'] });
+
+        if (!Device.isSupported) {
+          throw new Error('Este navegador não é compatível com o Twilio Voice.');
+        }
+
+        device = new Device(token, {
+          codecPreferences: ['opus', 'pcmu'],
+          logLevel: 1,
+          tokenRefreshMs: 60000,
+        });
+
+        device.on('error', (e) => {
+          setErro(mensagemErro(e, 'O Twilio não conseguiu iniciar a ligação.'));
+          setEstado('idle');
+        });
+
+        device.on('tokenWillExpire', async () => {
+          try {
+            device.updateToken(await obterToken());
+          } catch (e) {
+            setErro(mensagemErro(e, 'Não foi possível renovar o token do Twilio.'));
+            setPronto(false);
+          }
+        });
+
+        if (desmontado) {
+          device.destroy();
+          return;
+        }
+
         deviceRef.current = device;
         setPronto(true);
-      } catch (e) { setErro('Falha ao conectar no Twilio. Confira as credenciais.'); }
+      } catch (e) {
+        setErro(mensagemErro(e, 'Falha ao conectar no Twilio. Confira as credenciais.'));
+      }
     })();
-    return () => { clearInterval(timerRef.current); };
+
+    return () => {
+      desmontado = true;
+      clearInterval(timerRef.current);
+      device?.destroy();
+    };
   }, []);
 
   useEffect(() => {
@@ -64,25 +126,42 @@ export default function DiscadorEVS() {
     if (!deviceRef.current || !lead) return;
     setSeg(0); setEstado('dialing'); setErro('');
     try {
+      if (navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+      }
+
       const call = await deviceRef.current.connect({ params: { To: lead.telefone } });
       callRef.current = call;
       call.on('accept', (c) => { sidRef.current = c.parameters?.CallSid || null; setEstado('active'); });
       call.on('disconnect', () => { clearInterval(timerRef.current); setEstado('wrapup'); });
       call.on('cancel', () => { setEstado('wrapup'); });
-      call.on('error', (e) => { setErro('Erro na ligação: ' + e.message); setEstado('wrapup'); });
-    } catch (e) { setErro('Não foi possível ligar: ' + e.message); setEstado('idle'); }
+      call.on('error', (e) => { setErro('Erro na ligação: ' + mensagemErro(e, 'erro desconhecido')); setEstado('wrapup'); });
+    } catch (e) {
+      setErro('Não foi possível ligar: ' + mensagemErro(e, 'erro desconhecido'));
+      setEstado('idle');
+    }
   };
 
   const encerrar = () => { if (callRef.current) callRef.current.disconnect(); };
 
   const registrar = async (resultado) => {
     try {
-      await fetch('/api/ligacoes', {
+      const response = await fetch('/api/ligacoes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lead_id: lead.id, resultado, duracao_seg: seg, nota, twilio_sid: sidRef.current }),
       });
-    } catch (e) { /* segue mesmo se falhar o log */ }
+
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.error) {
+        throw new Error(body.error || 'Não foi possível salvar o resultado.');
+      }
+    } catch (e) {
+      setErro(mensagemErro(e, 'Não foi possível salvar o resultado.'));
+      return;
+    }
+
     setNota(''); setSeg(0); sidRef.current = null; setEstado('idle');
     setIdx((i) => (i + 1 < leads.length ? i + 1 : i));
   };
