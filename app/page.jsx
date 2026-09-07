@@ -11,6 +11,7 @@ const C = {
 
 const MAX_TENTATIVAS = 3;
 const AUTO_NEXT_DELAY_MS = 900;
+const AUTO_REFRESH_MS = 30000;
 const OUTBOX_KEY = 'discador_evs_kabam_outbox_v1';
 
 const RESULTADOS = [
@@ -109,12 +110,15 @@ export default function DiscadorEVS() {
   const [erroResultado, setErroResultado] = useState('');
   const [kabamOutbox, setKabamOutbox] = useState([]);
   const [fonteDados, setFonteDados] = useState('');
+  const [atualizando, setAtualizando] = useState(false);
+  const [ultimaAtualizacao, setUltimaAtualizacao] = useState(null);
 
   const deviceRef = useRef(null);
   const callRef = useRef(null);
   const timerRef = useRef(null);
   const nextTimerRef = useRef(null);
   const sidRef = useRef(null);
+  const refreshRef = useRef(false);
 
   const filaElegivel = useMemo(() => leads.filter(leadElegivel), [leads]);
   const filaVisivel = useMemo(() => {
@@ -145,20 +149,53 @@ export default function DiscadorEVS() {
   useEffect(() => { setKabamOutbox(safeStorageRead(OUTBOX_KEY, [])); }, []);
   useEffect(() => { safeStorageWrite(OUTBOX_KEY, kabamOutbox); }, [kabamOutbox]);
 
+
+  const carregarDados = async ({ silencioso = false } = {}) => {
+    if (refreshRef.current) return;
+    refreshRef.current = true;
+    if (!silencioso) setAtualizando(true);
+
+    try {
+      const [filaResponse, ligacoesResponse] = await Promise.all([
+        fetch('/api/fila', { cache: 'no-store' }),
+        fetch('/api/ligacoes', { cache: 'no-store' }),
+      ]);
+
+      const filaBody = await filaResponse.json().catch(() => ({}));
+      if (!filaResponse.ok || filaBody.error) {
+        throw new Error(filaBody.error || 'Falha ao carregar a fila.');
+      }
+
+      const carregados = (filaBody.leads || []).map(normalizarLead);
+      setLeads(carregados);
+      setActiveId((currentId) => (
+        carregados.some((item) => String(item.id) === String(currentId))
+          ? currentId
+          : carregados.find(leadElegivel)?.id || carregados[0]?.id || null
+      ));
+      setFonteDados(filaBody.source || '');
+
+      const ligacoesBody = await ligacoesResponse.json().catch(() => ({}));
+      if (ligacoesResponse.ok && !ligacoesBody.error) {
+        setHistorico((ligacoesBody.ligacoes || []).map(normalizarLigacao));
+        if (ligacoesBody.source) setFonteDados(ligacoesBody.source);
+      }
+
+      setUltimaAtualizacao(new Date());
+      if (!silencioso) setErro('');
+    } catch (error) {
+      if (!silencioso) setErro(mensagemErro(error, 'Falha ao atualizar a fila.'));
+    } finally {
+      refreshRef.current = false;
+      setAtualizando(false);
+    }
+  };
+
   useEffect(() => {
     let desmontado = false; let device = null;
     (async () => {
-      try {
-        const response = await fetch('/api/fila', { cache: 'no-store' }); const body = await response.json().catch(() => ({}));
-        if (!response.ok || body.error) throw new Error(body.error || 'Falha ao carregar a fila.');
-        const carregados = (body.leads || []).map(normalizarLead);
-        if (!desmontado) { setLeads(carregados); setActiveId(carregados.find(leadElegivel)?.id || carregados[0]?.id || null); setFonteDados(body.source || ''); }
-      } catch (error) { if (!desmontado) setErro(mensagemErro(error, 'Falha ao carregar a fila.')); }
-
-      try {
-        const response = await fetch('/api/ligacoes', { cache: 'no-store' }); const body = await response.json().catch(() => ({}));
-        if (response.ok && !body.error && !desmontado) { setHistorico((body.ligacoes || []).map(normalizarLigacao)); if (body.source) setFonteDados(body.source); }
-      } catch (_) {}
+      await carregarDados();
+      if (desmontado) return;
 
       try {
         const token = await obterToken(); const { Device } = await import('@twilio/voice-sdk');
@@ -174,6 +211,14 @@ export default function DiscadorEVS() {
   }, []);
 
   useEffect(() => { if (estado === 'active') timerRef.current = setInterval(() => setSeg((seconds) => seconds + 1), 1000); return () => clearInterval(timerRef.current); }, [estado]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (estado === 'idle') carregarDados({ silencioso: true });
+    }, AUTO_REFRESH_MS);
+
+    return () => clearInterval(interval);
+  }, [estado]);
 
   const emitirComentarioKabam = (payload) => {
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('discador:comentario-kabam', { detail: payload }));
@@ -228,6 +273,7 @@ export default function DiscadorEVS() {
         <div className="brand"><div className="brand-mark">SZ</div><div><div className="brand-name">Discador EVS</div><div className="brand-sub">Equipe que Vende Sozinha</div></div></div>
         <div className="auto-box"><div className="auto-title">Discador <span className={autoAtivo && !autoPausado ? 'state-dot active' : 'state-dot'}>●</span></div><div className="auto-state">{autoAtivo ? (autoPausado ? 'pausado' : 'automático ativo') : 'modo manual'}</div><button className="btn-mode" onClick={alternarAutomatico} disabled={!filaElegivel.length && !autoAtivo}>{autoAtivo && !autoPausado ? 'Pausar' : autoAtivo ? 'Retomar' : 'Iniciar automático'}</button></div>
         <div className="kpis"><Kpi label="Ligações" value={stats.feitas} /><Kpi label="Atendidas" value={stats.atendidas} /><Kpi label="Atendimento" value={`${stats.atendimento}%`} highlight /><Kpi label="Tempo falado" value={fmtTotal(stats.tempo)} /><Kpi label="Agendamentos" value={stats.agendamentos} tone="green" /><Kpi label="Conversão" value={`${stats.conversao}%`} tone="green" highlight /><Kpi label="Na fila" value={stats.fila} /><Kpi label="Retornos" value={stats.retornos} tone="gold" /></div>
+        <div className="refresh-box"><button className="btn-refresh" onClick={() => carregarDados()} disabled={atualizando}><RefreshIcon />{atualizando ? 'Atualizando…' : 'Atualizar fila'}</button><div className="refresh-status">{ultimaAtualizacao ? `Atualizada às ${fmtHora(ultimaAtualizacao)}` : 'Aguardando dados'}</div></div>
         <div className="operator"><div className="operator-avatar">SS</div><div><div className="operator-name">Suzana Santos</div><div className="operator-status">{fonteDados === 'Base_Geral' ? 'Base_Geral · conectada' : fonteDados === 'Supabase' ? 'fallback · Supabase' : pronto ? 'preparando ligação' : 'conectando dados'}</div></div></div>
       </header>
 
@@ -249,5 +295,6 @@ function Kpi({ label, value, tone, highlight }) { return <div className="kpi"><d
 function Qualification({ label, value, tone, highlight }) { return <div className="qualification"><div className="qualification-label">{label}</div><div className={`qualification-value ${tone || ''} ${highlight ? 'highlight' : ''}`}>{value || '—'}</div></div>; }
 function ReadOnlyField({ label, value, hint, multiline }) { return <label className="read-field"><span>{label}</span>{multiline ? <textarea value={value || ''} readOnly /> : <input value={value || ''} readOnly />}{hint && <small>{hint}</small>}</label>; }
 function CallState({ estado, seconds }) { if (estado === 'idle') return <div className="call-idle">Pronto para ligar</div>; const map = { dialing: ['Discando…', 'gold'], active: ['Em ligação', 'green'], wrapup: ['Ligação encerrada', 'muted'] }[estado] || ['Pronto', 'muted']; return <div className="call-state"><div className={`state-indicator ${map[1]}`} /><div className={`call-state-label ${map[1]}`}>{map[0]}</div>{(estado === 'active' || estado === 'wrapup') && <div className="call-timer">{fmtCron(seconds)}</div>}</div>; }
+function RefreshIcon() { return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4" /><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4" /></svg>; }
 function PhoneIcon() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" /></svg>; }
 function HangupIcon() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" /><line x1="23" y1="1" x2="1" y2="23" /></svg>; }
