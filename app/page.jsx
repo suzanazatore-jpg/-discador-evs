@@ -120,6 +120,11 @@ export default function DiscadorEVS() {
   const nextTimerRef = useRef(null);
   const sidRef = useRef(null);
   const refreshRef = useRef(false);
+  const callAcceptedRef = useRef(false);
+  const automaticRecordingRef = useRef(false);
+  const manualHangupRef = useRef(false);
+  const autoAtivoRef = useRef(false);
+  const autoPausadoRef = useRef(true);
 
   const filaElegivel = useMemo(() => leads.filter(leadElegivel), [leads]);
   const filaVisivel = useMemo(() => {
@@ -225,48 +230,276 @@ export default function DiscadorEVS() {
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('discador:comentario-kabam', { detail: payload }));
   };
 
-  const chamarLead = async (target) => {
-    if (!target || !leadElegivel(target) || !deviceRef.current) return;
-    clearTimeout(nextTimerRef.current); setActiveId(target.id); setSeg(0); setEstado('dialing'); setErro('');
-    try {
-      if (navigator.mediaDevices?.getUserMedia) { const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); stream.getTracks().forEach((track) => track.stop()); }
-      const call = await deviceRef.current.connect({ params: { To: target.telefone } }); callRef.current = call;
-      call.on('accept', (acceptedCall) => { sidRef.current = acceptedCall.parameters?.CallSid || null; setEstado('active'); });
-      call.on('disconnect', () => { clearInterval(timerRef.current); setEstado('wrapup'); });
-      call.on('cancel', () => setEstado('wrapup'));
-      call.on('error', (error) => { setErro(`Erro na ligação: ${mensagemErro(error, 'erro desconhecido')}`); setEstado('wrapup'); });
-    } catch (error) { setErro(`Não foi possível ligar: ${mensagemErro(error, 'erro desconhecido')}`); setEstado('idle'); }
+  const registrarNaoAtendimentoAutomatico = (target) => {
+    if (!target || manualHangupRef.current || callAcceptedRef.current || automaticRecordingRef.current) {
+      setEstado('wrapup');
+      return;
+    }
+
+    automaticRecordingRef.current = true;
+    setEstado('wrapup');
+
+    registrar('nao_atendeu', target, {
+      automatico: true,
+      duracao_seg: 0,
+      nota: '',
+    }).finally(() => {
+      automaticRecordingRef.current = false;
+    });
   };
 
-  const iniciarAutomatico = () => { const candidato = leadElegivel(lead) ? lead : filaElegivel[0]; if (!candidato) return; clearTimeout(nextTimerRef.current); setAutoAtivo(true); setAutoPausado(false); if (estado === 'idle') chamarLead(candidato); };
-  const pausarAutomatico = () => { clearTimeout(nextTimerRef.current); setAutoPausado(true); };
+  const chamarLead = async (target) => {
+    if (!target || !leadElegivel(target) || !deviceRef.current) return;
+
+    clearTimeout(nextTimerRef.current);
+    setActiveId(target.id);
+    setSeg(0);
+    setEstado('dialing');
+    setErro('');
+    callAcceptedRef.current = false;
+    automaticRecordingRef.current = false;
+    manualHangupRef.current = false;
+
+    try {
+      if (navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+      }
+
+      const call = await deviceRef.current.connect({
+        params: {
+          To: target.telefone,
+          LeadId: target.idLead || target.id,
+          SheetRow: target.sheetRow || '',
+          Attempt: Number(target.tentativas || 0) + 1,
+        },
+      });
+
+      callRef.current = call;
+
+      call.on('ringing', () => setEstado('dialing'));
+
+      call.on('accept', (acceptedCall) => {
+        callAcceptedRef.current = true;
+        sidRef.current = acceptedCall.parameters?.CallSid || null;
+        setEstado('active');
+      });
+
+      call.on('disconnect', () => {
+        clearInterval(timerRef.current);
+        callRef.current = null;
+
+        if (!manualHangupRef.current && !callAcceptedRef.current) {
+          registrarNaoAtendimentoAutomatico(target);
+          return;
+        }
+
+        setEstado('wrapup');
+      });
+
+      call.on('cancel', () => {
+        callRef.current = null;
+        if (!manualHangupRef.current && !callAcceptedRef.current) {
+          registrarNaoAtendimentoAutomatico(target);
+        } else {
+          setEstado('wrapup');
+        }
+      });
+
+      call.on('reject', () => {
+        callRef.current = null;
+        if (!manualHangupRef.current && !callAcceptedRef.current) {
+          registrarNaoAtendimentoAutomatico(target);
+        } else {
+          setEstado('wrapup');
+        }
+      });
+
+      call.on('error', (error) => {
+        manualHangupRef.current = true;
+        setErro('Erro na ligação: ' + mensagemErro(error, 'erro desconhecido'));
+        setEstado('wrapup');
+      });
+    } catch (error) {
+      manualHangupRef.current = true;
+      setErro('Não foi possível ligar: ' + mensagemErro(error, 'erro desconhecido'));
+      setEstado('idle');
+    }
+  };
+
+  const iniciarAutomatico = () => {
+    const candidato = leadElegivel(lead) ? lead : filaElegivel[0];
+    if (!candidato) return;
+
+    clearTimeout(nextTimerRef.current);
+    autoAtivoRef.current = true;
+    autoPausadoRef.current = false;
+    setAutoAtivo(true);
+    setAutoPausado(false);
+
+    if (estado === 'idle') chamarLead(candidato);
+  };
+
+  const pausarAutomatico = () => {
+    clearTimeout(nextTimerRef.current);
+    autoPausadoRef.current = true;
+    setAutoPausado(true);
+  };
+
   const alternarAutomatico = () => { if (autoAtivo && !autoPausado) pausarAutomatico(); else iniciarAutomatico(); };
-  const encerrar = () => { if (callRef.current) callRef.current.disconnect(); else setEstado('wrapup'); };
+  const encerrar = () => {
+    manualHangupRef.current = true;
+    if (callRef.current) callRef.current.disconnect();
+    else setEstado('wrapup');
+  };
 
   const selecionarResultado = (resultado) => { const configuracao = resultadoDe(resultado); if (!configuracao) return; setResultadoPendente(resultado); setDataProxima(''); setHoraProxima(''); setErroResultado(''); };
   const confirmarResultado = () => { const precisaData = ['reuniao', 'interessado', 'retornar'].includes(resultadoPendente); if (precisaData && (!dataProxima || (resultadoPendente === 'reuniao' && !horaProxima))) { setErroResultado(resultadoPendente === 'reuniao' ? 'Informe a data e o horário da reunião.' : 'Informe a data do retorno.'); return; } registrar(resultadoPendente); };
 
-  async function registrar(resultado) {
-    if (!lead) return;
-    const configuracao = resultadoDe(resultado); const tentativa = Number(lead.tentativas || 0) + (['nao_atendeu', 'caixa'].includes(resultado) ? 1 : 0); const atingiuLimite = ['nao_atendeu', 'caixa'].includes(resultado) && tentativa >= MAX_TENTATIVAS;
-    const dataAgendamento = resultado === 'reuniao' ? dataProxima : ''; const dataRetorno = ['interessado', 'retornar'].includes(resultado) ? dataProxima : ''; const proximaAcao = atingiuLimite ? 'Limite de tentativas — revisar' : proximaAcaoDe(resultado); const notaLimpa = nota.trim();
+  async function registrar(resultado, leadOverride = null, options = {}) {
+    const leadAtual = leadOverride || lead;
+    if (!leadAtual) return;
+
+    const configuracao = resultadoDe(resultado);
+    const tentativa = Number(leadAtual.tentativas || 0) + (['nao_atendeu', 'caixa'].includes(resultado) ? 1 : 0);
+    const atingiuLimite = ['nao_atendeu', 'caixa'].includes(resultado) && tentativa >= MAX_TENTATIVAS;
+    const dataAgendamento = resultado === 'reuniao' ? dataProxima : '';
+    const dataRetorno = ['interessado', 'retornar'].includes(resultado) ? dataProxima : '';
+    const proximaAcao = atingiuLimite ? 'Limite de tentativas — revisar' : proximaAcaoDe(resultado);
+    const duracaoAtual = options.duracao_seg ?? seg;
+    const notaAtual = options.nota ?? nota;
+    const notaLimpa = String(notaAtual || '').trim();
+
     try {
-      const response = await fetch('/api/ligacoes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_id: lead.id, id_lead: lead.idLead || lead.id, sheet_row: lead.sheetRow, nome: lead.nome, telefone: lead.telefone, resultado, duracao_seg: seg, nota: notaLimpa, twilio_sid: sidRef.current, proxima_acao: proximaAcao, data_retorno: dataRetorno, data_agendamento: dataAgendamento, tentativa }) });
-      const body = await response.json().catch(() => ({})); if (!response.ok || body.error) throw new Error(body.error || 'Não foi possível salvar o resultado.');
-      const entrada = normalizarLigacao({ id: body.ligacao?.id || `local-${Date.now()}`, lead_id: lead.id, resultado, duracao_seg: seg, nota: notaLimpa, created_at: body.ligacao?.created_at || new Date().toISOString() }); setHistorico((atual) => [entrada, ...atual]);
-      if (notaLimpa) {
-        const payload = body.kabam || { evento: 'discador.comentario', versao: 1, status: 'pendente', sincronizado: false, id_evento: entrada.id, id_lead: lead.id, nome: lead.nome, telefone: lead.telefone, comentario: notaLimpa, resultado, duracao_segundos: seg, data_hora: entrada.created_at, proxima_acao: proximaAcao, data_retorno: dataRetorno, data_agendamento: dataAgendamento, origem: 'Discador EVS', destino: 'Kabam / BotConversa' };
-        setKabamOutbox((outbox) => [payload, ...outbox]); emitirComentarioKabam(payload);
+      const response = await fetch('/api/ligacoes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lead_id: leadAtual.id,
+          id_lead: leadAtual.idLead || leadAtual.id,
+          sheet_row: leadAtual.sheetRow,
+          nome: leadAtual.nome,
+          telefone: leadAtual.telefone,
+          resultado,
+          duracao_seg: duracaoAtual,
+          nota: notaLimpa,
+          twilio_sid: sidRef.current,
+          proxima_acao: proximaAcao,
+          data_retorno: dataRetorno,
+          data_agendamento: dataAgendamento,
+          tentativa,
+        }),
+      });
+
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body.error) {
+        throw new Error(body.error || 'Não foi possível salvar o resultado.');
       }
-    } catch (error) { setErro(mensagemErro(error, 'Não foi possível salvar o resultado da ligação.')); return; }
+
+      const entrada = normalizarLigacao({
+        id: body.ligacao?.id || 'local-' + Date.now(),
+        lead_id: leadAtual.id,
+        resultado,
+        duracao_seg: duracaoAtual,
+        nota: notaLimpa,
+        tentativa,
+        created_at: body.ligacao?.created_at || new Date().toISOString(),
+      });
+
+      setHistorico((atual) => [entrada, ...atual]);
+
+      if (notaLimpa) {
+        const payload = body.kabam || {
+          evento: 'discador.comentario',
+          versao: 1,
+          status: 'pendente',
+          sincronizado: false,
+          id_evento: entrada.id,
+          id_lead: leadAtual.id,
+          nome: leadAtual.nome,
+          telefone: leadAtual.telefone,
+          comentario: notaLimpa,
+          resultado,
+          duracao_segundos: duracaoAtual,
+          data_hora: entrada.created_at,
+          proxima_acao: proximaAcao,
+          data_retorno: dataRetorno,
+          data_agendamento: dataAgendamento,
+          origem: 'Discador EVS',
+          destino: 'Kabam / BotConversa',
+        };
+
+        setKabamOutbox((outbox) => [payload, ...outbox]);
+        emitirComentarioKabam(payload);
+      }
+    } catch (error) {
+      setErro(mensagemErro(error, 'Não foi possível salvar o resultado da ligação.'));
+      return;
+    }
 
     const novoStatus = atingiuLimite ? 'limite_tentativas' : configuracao.status;
-    const leadsAtualizados = leads.map((item) => item.id === lead.id ? { ...item, status: novoStatus, tentativas: tentativa, observacao: notaLimpa || item.observacao, dataRetorno, dataAgendamento, podeLigar: atingiuLimite ? 'NÃO' : item.podeLigar, motivoBloqueio: atingiuLimite ? 'Limite de tentativas sem atendimento' : item.motivoBloqueio } : item);
+    const leadsAtualizados = leads.map((item) => (
+      item.id === leadAtual.id
+        ? {
+            ...item,
+            status: novoStatus,
+            tentativas: tentativa,
+            observacao: notaLimpa || item.observacao,
+            dataRetorno,
+            dataAgendamento,
+            podeLigar: atingiuLimite ? 'NÃO' : item.podeLigar,
+            motivoBloqueio: atingiuLimite
+              ? 'Limite de tentativas sem atendimento'
+              : item.motivoBloqueio,
+          }
+        : item
+    ));
+
     setLeads(leadsAtualizados);
-    const candidatos = leadsAtualizados.filter((item) => leadElegivel(item) && String(item.id) !== String(lead.id)); const proximo = candidatos[0] || leadsAtualizados.find(leadElegivel) || null; const continuarAutomatico = Boolean(configuracao.avancaAutomatico && autoAtivo && !autoPausado && proximo);
-    if (!proximo) { setAutoAtivo(false); setAutoPausado(true); } else { setActiveId(proximo.id); if (continuarAutomatico) { clearTimeout(nextTimerRef.current); nextTimerRef.current = setTimeout(() => chamarLead(proximo), AUTO_NEXT_DELAY_MS); } else if (autoAtivo) setAutoPausado(true); }
-    setNota(''); setSeg(0); sidRef.current = null; setResultadoPendente(null); setDataProxima(''); setHoraProxima(''); setErroResultado(''); setEstado('idle');
+
+    const candidatos = leadsAtualizados.filter(
+      (item) => leadElegivel(item) && String(item.id) !== String(leadAtual.id)
+    );
+    const proximo = candidatos[0] || leadsAtualizados.find(leadElegivel) || null;
+    const continuarAutomatico = Boolean(
+      configuracao.avancaAutomatico
+      && autoAtivoRef.current
+      && !autoPausadoRef.current
+      && proximo
+    );
+
+    if (!proximo) {
+      clearTimeout(nextTimerRef.current);
+      autoAtivoRef.current = false;
+      autoPausadoRef.current = true;
+      setAutoAtivo(false);
+      setAutoPausado(true);
+    } else {
+      setActiveId(proximo.id);
+
+      if (continuarAutomatico) {
+        clearTimeout(nextTimerRef.current);
+        autoPausadoRef.current = false;
+        setAutoPausado(false);
+        nextTimerRef.current = setTimeout(() => chamarLead(proximo), AUTO_NEXT_DELAY_MS);
+      } else if (autoAtivoRef.current) {
+        autoPausadoRef.current = true;
+        setAutoPausado(true);
+      }
+    }
+
+    setNota('');
+    setSeg(0);
+    sidRef.current = null;
+    setResultadoPendente(null);
+    setDataProxima('');
+    setHoraProxima('');
+    setErroResultado('');
+    setEstado('idle');
+    callRef.current = null;
+    manualHangupRef.current = false;
   }
+
 
   return (
     <div className="app-shell">
