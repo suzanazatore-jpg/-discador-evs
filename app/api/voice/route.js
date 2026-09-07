@@ -25,7 +25,11 @@ async function handler(request) {
         return new Response('Caller ID não configurado.', { status: 500 });
       }
 
-      const dial = response.dial({ callerId: process.env.TWILIO_CALLER_ID });
+      const dial = response.dial({
+        callerId: process.env.TWILIO_CALLER_ID,
+        answerOnBridge: true,
+        timeout: 25,
+      });
       dial.number(to);
     } else {
       response.say({ language: 'pt-BR' }, 'Numero nao informado.');
