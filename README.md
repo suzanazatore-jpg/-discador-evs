@@ -68,9 +68,32 @@ Guarde: URL = SUPABASE_URL · service_role = SUPABASE_SERVICE_ROLE_KEY
    `https://discador-evs.vercel.app/api/voice` — método **POST**.
 3. Salve.
 
-## Parte G — Testar
-1. Adicione alguns leads na tabela `leads` do Supabase (telefone em E.164:
-   +55 + DDD + número). Há exemplos comentados no final do schema.
+## Parte G — Conectar a Base_Geral sem pop-up de autorização
+
+O painel agora suporta a `Base_Geral` como fonte principal dos leads. O
+arquivo `apps-script/DiscadorEVS_BaseGeral_Endpoint.gs` é um Web App separado
+do Apps Script financeiro. Ele lê a aba `Base_Geral`, grava os resultados nas
+colunas P, Q, S, T, U, V, W, X e AB e cria a aba `Historico_Ligacoes` na
+primeira ligação.
+
+Esse endpoint não altera os fluxos do Pabbly.
+
+1. Crie um projeto novo em script.google.com.
+2. Cole o conteúdo de `apps-script/DiscadorEVS_BaseGeral_Endpoint.gs`.
+3. Publique como Web App, executando como você e com acesso `Qualquer pessoa com o link`.
+4. Se criar a propriedade opcional `DISCADOR_API_TOKEN`, coloque o mesmo valor
+   em `BASE_GERAL_APPS_SCRIPT_TOKEN` na Vercel.
+5. Na Vercel, adicione `BASE_GERAL_APPS_SCRIPT_URL` com a URL publicada.
+6. Faça um novo deploy e valide a fila com a URL do painel.
+7. Depois de confirmar, defina `BASE_GERAL_REQUIRED=true` para impedir que o
+   sistema volte silenciosamente para o Supabase.
+
+O endpoint usa `sheet_row` para atualizar a linha correta quando `ID_Lead`
+estiver vazio. A coluna R (`Pode_Ligar`) não é sobrescrita pelo discador.
+
+## Parte H — Testar
+1. Confirme alguns leads na aba `Base_Geral`, com telefone na coluna E em
+   E.164: `+55` + DDD + número.
 2. Abra a URL da Vercel. O navegador vai pedir permissão de microfone: permita.
 3. Clique em "Ligar agora". Fale pelo headset. Marque o resultado.
 

@@ -38,8 +38,12 @@ const listaDe = (value) => Array.isArray(value) ? value.filter(Boolean).map(Stri
 
 function normalizarLead(raw, index) {
   const tags = [...listaDe(valorDe(raw, ['tags', 'Tags'])), ...listaDe(valorDe(raw, ['tags_pabbly', 'tagsPabbly', 'Tags_Pabbly']))].filter((tag, position, all) => all.indexOf(tag) === position);
+  const sheetRow = valorDe(raw, ['sheet_row', 'sheetRow', 'row_index', 'rowIndex']);
+  const idLead = valorDe(raw, ['id', 'id_lead', 'ID_Lead']);
   return {
-    id: valorDe(raw, ['id', 'id_lead', 'ID_Lead']) ?? `lead-${index}`,
+    id: idLead || (sheetRow ? `sheet-row-${sheetRow}` : `lead-${index}`),
+    idLead: idLead || '',
+    sheetRow: sheetRow ? Number(sheetRow) : null,
     nome: valorDe(raw, ['nome', 'Nome']) || 'Lead sem nome',
     telefone: valorDe(raw, ['telefone', 'whatsapp', 'Whatsapp', 'WhatsApp']) || '',
     email: valorDe(raw, ['email', 'Email']) || '',
@@ -51,6 +55,7 @@ function normalizarLead(raw, index) {
     dezDias: valorDe(raw, ['dez_dias', 'dezDias', 'ficar_10_dias_fora', 'Ficar 10 Dias fora']) || '',
     desafio: valorDe(raw, ['desafio', 'dor', 'Desafio']) || '',
     origem: valorDe(raw, ['origem', 'Origem', 'etiqueta', 'Etiqueta']) || '',
+    etiqueta: valorDe(raw, ['etiqueta', 'Etiqueta']) || '',
     status: normalizarTexto(valorDe(raw, ['status', 'Status']) || 'novo'),
     tags,
     tagsPabbly: valorDe(raw, ['tags_pabbly', 'tagsPabbly', 'Tags_Pabbly']) || '',
@@ -67,8 +72,9 @@ function normalizarLead(raw, index) {
 function leadBloqueado(lead) {
   if (!lead) return true;
   const status = normalizarTexto(lead.status);
-  const tags = [...(lead.tags || []), lead.tagsPabbly, lead.motivoBloqueio].filter(Boolean).map((tag) => normalizarTexto(tag).replace(/[\s-]+/g, '_'));
-  return ['vendido', 'descartado', 'nao_ligar', 'limite_tentativas'].includes(status) || tags.some((tag) => tag.includes('nao_ligar')) || normalizarTexto(lead.podeLigar) === 'nao' || lead.podeLigar === false;
+  const tags = [...(lead.tags || []), lead.tagsPabbly, lead.etiqueta, lead.motivoBloqueio].filter(Boolean).map((tag) => normalizarTexto(tag).replace(/[\s-]+/g, '_'));
+  const podeLigar = normalizarTexto(lead.podeLigar).replace(/[\s-]+/g, '_');
+  return ['vendido', 'descartado', 'nao_ligar', 'limite_tentativas'].includes(status) || tags.some((tag) => tag.includes('nao_ligar')) || ['nao', 'nao_ligar'].includes(podeLigar) || lead.podeLigar === false;
 }
 
 function leadElegivel(lead) {
@@ -102,6 +108,7 @@ export default function DiscadorEVS() {
   const [horaProxima, setHoraProxima] = useState('');
   const [erroResultado, setErroResultado] = useState('');
   const [kabamOutbox, setKabamOutbox] = useState([]);
+  const [fonteDados, setFonteDados] = useState('');
 
   const deviceRef = useRef(null);
   const callRef = useRef(null);
@@ -145,12 +152,12 @@ export default function DiscadorEVS() {
         const response = await fetch('/api/fila', { cache: 'no-store' }); const body = await response.json().catch(() => ({}));
         if (!response.ok || body.error) throw new Error(body.error || 'Falha ao carregar a fila.');
         const carregados = (body.leads || []).map(normalizarLead);
-        if (!desmontado) { setLeads(carregados); setActiveId(carregados.find(leadElegivel)?.id || carregados[0]?.id || null); }
+        if (!desmontado) { setLeads(carregados); setActiveId(carregados.find(leadElegivel)?.id || carregados[0]?.id || null); setFonteDados(body.source || ''); }
       } catch (error) { if (!desmontado) setErro(mensagemErro(error, 'Falha ao carregar a fila.')); }
 
       try {
         const response = await fetch('/api/ligacoes', { cache: 'no-store' }); const body = await response.json().catch(() => ({}));
-        if (response.ok && !body.error && !desmontado) setHistorico((body.ligacoes || []).map(normalizarLigacao));
+        if (response.ok && !body.error && !desmontado) { setHistorico((body.ligacoes || []).map(normalizarLigacao)); if (body.source) setFonteDados(body.source); }
       } catch (_) {}
 
       try {
@@ -198,7 +205,7 @@ export default function DiscadorEVS() {
     const configuracao = resultadoDe(resultado); const tentativa = Number(lead.tentativas || 0) + (['nao_atendeu', 'caixa'].includes(resultado) ? 1 : 0); const atingiuLimite = ['nao_atendeu', 'caixa'].includes(resultado) && tentativa >= MAX_TENTATIVAS;
     const dataAgendamento = resultado === 'reuniao' ? dataProxima : ''; const dataRetorno = ['interessado', 'retornar'].includes(resultado) ? dataProxima : ''; const proximaAcao = atingiuLimite ? 'Limite de tentativas — revisar' : proximaAcaoDe(resultado); const notaLimpa = nota.trim();
     try {
-      const response = await fetch('/api/ligacoes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_id: lead.id, resultado, duracao_seg: seg, nota: notaLimpa, twilio_sid: sidRef.current, proxima_acao: proximaAcao, data_retorno: dataRetorno, data_agendamento: dataAgendamento, tentativa }) });
+      const response = await fetch('/api/ligacoes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lead_id: lead.id, id_lead: lead.idLead || lead.id, sheet_row: lead.sheetRow, nome: lead.nome, telefone: lead.telefone, resultado, duracao_seg: seg, nota: notaLimpa, twilio_sid: sidRef.current, proxima_acao: proximaAcao, data_retorno: dataRetorno, data_agendamento: dataAgendamento, tentativa }) });
       const body = await response.json().catch(() => ({})); if (!response.ok || body.error) throw new Error(body.error || 'Não foi possível salvar o resultado.');
       const entrada = normalizarLigacao({ id: body.ligacao?.id || `local-${Date.now()}`, lead_id: lead.id, resultado, duracao_seg: seg, nota: notaLimpa, created_at: body.ligacao?.created_at || new Date().toISOString() }); setHistorico((atual) => [entrada, ...atual]);
       if (notaLimpa) {
@@ -221,7 +228,7 @@ export default function DiscadorEVS() {
         <div className="brand"><div className="brand-mark">SZ</div><div><div className="brand-name">Discador EVS</div><div className="brand-sub">Equipe que Vende Sozinha</div></div></div>
         <div className="auto-box"><div className="auto-title">Discador <span className={autoAtivo && !autoPausado ? 'state-dot active' : 'state-dot'}>●</span></div><div className="auto-state">{autoAtivo ? (autoPausado ? 'pausado' : 'automático ativo') : 'modo manual'}</div><button className="btn-mode" onClick={alternarAutomatico} disabled={!filaElegivel.length && !autoAtivo}>{autoAtivo && !autoPausado ? 'Pausar' : autoAtivo ? 'Retomar' : 'Iniciar automático'}</button></div>
         <div className="kpis"><Kpi label="Ligações" value={stats.feitas} /><Kpi label="Atendidas" value={stats.atendidas} /><Kpi label="Atendimento" value={`${stats.atendimento}%`} highlight /><Kpi label="Tempo falado" value={fmtTotal(stats.tempo)} /><Kpi label="Agendamentos" value={stats.agendamentos} tone="green" /><Kpi label="Conversão" value={`${stats.conversao}%`} tone="green" highlight /><Kpi label="Na fila" value={stats.fila} /><Kpi label="Retornos" value={stats.retornos} tone="gold" /></div>
-        <div className="operator"><div className="operator-avatar">SS</div><div><div className="operator-name">Suzana Santos</div><div className="operator-status">{pronto ? 'operadora · online' : 'preparando ligação'}</div></div></div>
+        <div className="operator"><div className="operator-avatar">SS</div><div><div className="operator-name">Suzana Santos</div><div className="operator-status">{fonteDados === 'Base_Geral' ? 'Base_Geral · conectada' : fonteDados === 'Supabase' ? 'fallback · Supabase' : pronto ? 'preparando ligação' : 'conectando dados'}</div></div></div>
       </header>
 
       {erro && <div className="alert-error">{erro}</div>}

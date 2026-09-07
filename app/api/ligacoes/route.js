@@ -1,4 +1,10 @@
 import { getSupabaseAdmin } from '@/lib/supabase';
+import {
+  baseGeralMustBeAvailable,
+  isBaseGeralConfigured,
+  listarHistoricoBaseGeral,
+  registrarLigacaoBaseGeral,
+} from '@/lib/base-geral';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -6,6 +12,29 @@ export const runtime = 'nodejs';
 // Retorna o histórico para a aba Histórico do painel.
 export async function GET() {
   try {
+    if (isBaseGeralConfigured()) {
+      try {
+        const ligacoes = await listarHistoricoBaseGeral();
+        return Response.json(
+          { ligacoes, source: 'Base_Geral' },
+          { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Base_Geral' } }
+        );
+      } catch (sheetsError) {
+        console.error('Histórico da Base_Geral indisponível; usando fallback Supabase:', sheetsError);
+        if (baseGeralMustBeAvailable()) {
+          return Response.json(
+            { error: sheetsError.message || 'Não foi possível ler o histórico da Base_Geral.' },
+            { status: 502, headers: { 'Cache-Control': 'no-store' } }
+          );
+        }
+      }
+    } else if (baseGeralMustBeAvailable()) {
+      return Response.json(
+        { error: 'BASE_GERAL_APPS_SCRIPT_URL não foi configurada.' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
+
     const supabaseAdmin = getSupabaseAdmin();
     const { data, error } = await supabaseAdmin
       .from('ligacoes')
@@ -15,8 +44,8 @@ export async function GET() {
     if (error) throw new Error(error.message);
 
     return Response.json(
-      { ligacoes: data || [] },
-      { headers: { 'Cache-Control': 'no-store' } }
+      { ligacoes: data || [], source: 'Supabase' },
+      { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Supabase' } }
     );
   } catch (error) {
     console.error('Erro ao carregar histórico de ligações:', error);
@@ -33,6 +62,10 @@ export async function POST(request) {
     const body = await request.json();
     const {
       lead_id,
+      id_lead,
+      sheet_row,
+      nome,
+      telefone,
       resultado,
       duracao_seg,
       nota,
@@ -47,6 +80,53 @@ export async function POST(request) {
       return Response.json(
         { error: 'lead_id e resultado são obrigatórios.' },
         { status: 400, headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
+
+    if (isBaseGeralConfigured()) {
+      try {
+        const sheetsResult = await registrarLigacaoBaseGeral({
+          lead_id,
+          id_lead: id_lead || lead_id,
+          sheet_row,
+          nome,
+          telefone,
+          resultado,
+          duracao_seg,
+          nota,
+          twilio_sid,
+          proxima_acao,
+          data_retorno,
+          data_agendamento,
+          tentativa,
+        });
+
+        const ligacao = sheetsResult.ligacao || sheetsResult.history || {
+          id: sheetsResult.history_id || `${lead_id}-${Date.now()}`,
+          lead_id,
+          resultado,
+          duracao_seg: duracao_seg || 0,
+          nota: nota || '',
+          created_at: new Date().toISOString(),
+        };
+
+        return Response.json(
+          { ok: true, source: 'Base_Geral', ligacao, kabam: sheetsResult.kabam || null },
+          { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Base_Geral' } }
+        );
+      } catch (sheetsError) {
+        console.error('Base_Geral indisponível; salvando resultado no fallback Supabase:', sheetsError);
+        if (baseGeralMustBeAvailable()) {
+          return Response.json(
+            { error: sheetsError.message || 'Não foi possível atualizar a Base_Geral.' },
+            { status: 502, headers: { 'Cache-Control': 'no-store' } }
+          );
+        }
+      }
+    } else if (baseGeralMustBeAvailable()) {
+      return Response.json(
+        { error: 'BASE_GERAL_APPS_SCRIPT_URL não foi configurada.' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } }
       );
     }
 
