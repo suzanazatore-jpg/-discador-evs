@@ -51,8 +51,9 @@ Guarde: URL = SUPABASE_URL · service_role = SUPABASE_SERVICE_ROLE_KEY
 
 ## Parte E — Publicar na Vercel
 1. Em vercel.com, clique em **Add New > Project** e importe o repositório.
-2. Antes de clicar em Deploy, abra **Environment Variables** e adicione as 7:
+2. Antes de clicar em Deploy, abra **Environment Variables** e adicione as variáveis:
    - TWILIO_ACCOUNT_SID  (o AC... da sua conta, na home do Twilio)
+   - TWILIO_AUTH_TOKEN  (Auth Token da sua conta Twilio)
    - TWILIO_API_KEY_SID  (SK... da Parte A)
    - TWILIO_API_KEY_SECRET  (secret da Parte A)
    - TWILIO_TWIML_APP_SID  (AP... da Parte B)
@@ -76,17 +77,19 @@ do Apps Script financeiro. Ele lê a aba `Base_Geral`, grava os resultados nas
 colunas P, Q, S, T, U, V, W, X e AB e cria a aba `Historico_Ligacoes` na
 primeira ligação.
 
-Esse endpoint não altera os fluxos do Pabbly.
+Esse endpoint não altera os fluxos do Pabbly. Como ele lida com nome, telefone,
+e-mail e outras informações dos leads, o token é obrigatório.
 
 1. Crie um projeto novo em script.google.com.
 2. Cole o conteúdo de `apps-script/DiscadorEVS_BaseGeral_Endpoint.gs`.
 3. Publique como Web App, executando como você e com acesso `Qualquer pessoa com o link`.
-4. Se criar a propriedade opcional `DISCADOR_API_TOKEN`, coloque o mesmo valor
-   em `BASE_GERAL_APPS_SCRIPT_TOKEN` na Vercel.
+4. Crie uma propriedade de script chamada `DISCADOR_API_TOKEN` com um valor
+   longo e aleatório. Coloque exatamente o mesmo valor em
+   `BASE_GERAL_APPS_SCRIPT_TOKEN` na Vercel.
 5. Na Vercel, adicione `BASE_GERAL_APPS_SCRIPT_URL` com a URL publicada.
 6. Faça um novo deploy e valide a fila com a URL do painel.
-7. Depois de confirmar, defina `BASE_GERAL_REQUIRED=true` para impedir que o
-   sistema volte silenciosamente para o Supabase.
+7. Mantenha `BASE_GERAL_REQUIRED=true` para impedir que o sistema volte
+   silenciosamente para o Supabase.
 
 O endpoint usa `sheet_row` para atualizar a linha correta quando `ID_Lead`
 estiver vazio. A coluna R (`Pode_Ligar`) não é sobrescrita pelo discador.
@@ -99,11 +102,33 @@ estiver vazio. A coluna R (`Pode_Ligar`) não é sobrescrita pelo discador.
 
 Pronto — o discador está no ar. 🎉
 
+## Parte I — Proteger o painel com login
+
+O painel possui uma tela de login com sessão protegida por cookie HttpOnly.
+Antes de publicar, adicione estas três variáveis na Vercel:
+
+- `DISCADOR_LOGIN`: usuário de acesso.
+- `DISCADOR_SENHA`: senha forte do painel.
+- `DISCADOR_AUTH_SECRET`: segredo aleatório com pelo menos 32 caracteres, usado para assinar a sessão.
+
+Depois de salvar as variáveis, faça um novo deploy. O painel passará a exigir
+login para a página e também para as APIs de leads, histórico e ligação. A
+sessão dura oito horas e pode ser encerrada pelo botão `Sair`.
+
+O endpoint `/api/voice` é a única rota operacional sem cookie, porque é chamado
+diretamente pelo servidor do Twilio. Ele valida o `TWILIO_AUTH_TOKEN` e a
+assinatura `X-Twilio-Signature` antes de devolver qualquer instrução de chamada.
+
+Não coloque senhas, tokens, chaves do Supabase ou URLs privadas em arquivos
+versionados. Todos esses valores devem ficar apenas nas variáveis de ambiente
+da Vercel e nas propriedades protegidas do Apps Script.
+
 ---
 
 ## Rodar localmente (opcional, pra testar antes)
 1. `npm install`
-2. Copie `.env.example` para `.env.local` e preencha as 7 variáveis.
+2. Copie `.env.example` para `.env.local` e preencha as variáveis do Twilio,
+   da Base_Geral e do login.
 3. `npm run dev` e abra http://localhost:3000
    (Para o Twilio chamar o /api/voice local, você precisaria expor com uma
    ferramenta tipo ngrok — mais simples testar direto na Vercel.)

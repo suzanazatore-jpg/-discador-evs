@@ -50,6 +50,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .operator-avatar { width: 36px; height: 36px; display: grid; place-items: center; border: 1.5px solid var(--gold); border-radius: 50%; background: var(--wine-light); font-size: 13px; font-weight: 600; }
 .operator-name { font-size: 13px; font-weight: 600; }
 .operator-status { margin-top: 2px; color: var(--gold-soft); font-size: 11px; }
+.logout-btn { margin-left: 4px; padding: 6px 9px; border: 1px solid rgba(234,223,192,.7); border-radius: 7px; background: transparent; color: var(--gold-soft); font-size: 11px; }
+.logout-btn:hover { border-color: var(--gold); color: #fff; }
 .alert-error { margin: 12px 18px 0; padding: 10px 14px; border: 1px solid #E2A4A4; border-radius: 9px; background: #FCEBEB; color: #8D2929; font-size: 13px; }
 
 .workspace { display: grid; grid-template-columns: 260px minmax(0, 1fr) 340px; min-height: calc(100vh - 79px); }
@@ -176,6 +178,24 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .scroll-area::-webkit-scrollbar { width: 8px; }
 .scroll-area::-webkit-scrollbar-thumb { border-radius: 8px; background: var(--gold-soft); }
 
+.login-shell { min-height: 100vh; display: grid; place-items: center; position: relative; padding: 28px 18px 54px; background: radial-gradient(circle at 18% 12%, rgba(198,162,76,.18), transparent 30%), radial-gradient(circle at 88% 82%, rgba(124,42,62,.14), transparent 34%), var(--cream); }
+.login-card { width: min(100%, 430px); padding: 34px 34px 28px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,253,249,.96); box-shadow: 0 20px 55px rgba(78,22,38,.12); }
+.login-brand { display: flex; align-items: center; gap: 11px; padding-bottom: 26px; border-bottom: 1px solid var(--line); }
+.login-brand .brand-mark { width: 46px; height: 46px; }
+.login-kicker { margin-top: 28px; color: var(--amber); font-size: 11px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; }
+.login-card h1 { margin: 8px 0 8px; color: var(--wine); font-family: Georgia, serif; font-size: 30px; line-height: 1.1; }
+.login-intro { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+.login-form { display: flex; flex-direction: column; gap: 16px; margin-top: 25px; }
+.login-form label { display: flex; flex-direction: column; gap: 7px; color: var(--ink); font-size: 12px; font-weight: 700; }
+.login-form input { width: 100%; padding: 12px 13px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink); font-size: 14px; font-weight: 400; }
+.login-form input:focus { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(198,162,76,.13); outline: 0; }
+.login-error { padding: 10px 12px; border: 1px solid #E2A4A4; border-radius: 8px; background: #FCEBEB; color: #8D2929; font-size: 12px; line-height: 1.4; }
+.login-submit { width: 100%; margin-top: 2px; padding: 13px 16px; border: 0; border-radius: 9px; background: var(--wine); color: #fff; font-size: 14px; font-weight: 700; }
+.login-submit:hover { background: var(--wine-light); }
+.login-security { display: flex; align-items: center; gap: 7px; margin-top: 22px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.login-security span { color: var(--green); font-size: 10px; }
+.login-footer { position: absolute; bottom: 18px; color: var(--muted); font-size: 11px; }
+
 @media (max-width: 1250px) {
   .topbar { gap: 10px; }
   .brand { min-width: 165px; }
@@ -200,6 +220,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .operator { margin-left: auto; min-width: 0; }
   .operator-name { display: none; }
   .operator-status { display: none; }
+  .logout-btn { padding: 5px 7px; }
   .workspace { display: flex; flex-direction: column; }
   .queue-panel { min-height: 280px; border-right: 0; border-bottom: 1px solid var(--line); }
   .cockpit { padding: 14px; }
@@ -207,4 +228,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .lead-phone-block { width: 100%; text-align: left; }
   .qualification-grid { grid-template-columns: repeat(2, 1fr); }
   .two-columns, .next-step-fields { grid-template-columns: 1fr; }
+  .login-card { padding: 28px 22px 24px; }
+  .login-card h1 { font-size: 27px; }
 }

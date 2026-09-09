@@ -353,6 +353,11 @@ export default function DiscadorEVS() {
     else setEstado('wrapup');
   };
 
+  const sair = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    window.location.assign('/login');
+  };
+
   const selecionarResultado = (resultado) => { const configuracao = resultadoDe(resultado); if (!configuracao) return; setResultadoPendente(resultado); setDataProxima(''); setHoraProxima(''); setErroResultado(''); };
   const confirmarResultado = () => { const precisaData = ['reuniao', 'interessado', 'retornar'].includes(resultadoPendente); if (precisaData && (!dataProxima || (resultadoPendente === 'reuniao' && !horaProxima))) { setErroResultado(resultadoPendente === 'reuniao' ? 'Informe a data e o horário da reunião.' : 'Informe a data do retorno.'); return; } registrar(resultadoPendente); };
 
@@ -508,7 +513,7 @@ export default function DiscadorEVS() {
         <div className="auto-box"><div className="auto-title">Discador <span className={autoAtivo && !autoPausado ? 'state-dot active' : 'state-dot'}>●</span></div><div className="auto-state">{autoAtivo ? (autoPausado ? 'pausado' : 'automático ativo') : 'modo manual'}</div><button className="btn-mode" onClick={alternarAutomatico} disabled={!filaElegivel.length && !autoAtivo}>{autoAtivo && !autoPausado ? 'Pausar' : autoAtivo ? 'Retomar' : 'Iniciar automático'}</button></div>
         <div className="kpis"><Kpi label="Ligações" value={stats.feitas} /><Kpi label="Atendidas" value={stats.atendidas} /><Kpi label="Atendimento" value={`${stats.atendimento}%`} highlight /><Kpi label="Tempo falado" value={fmtTotal(stats.tempo)} /><Kpi label="Agendamentos" value={stats.agendamentos} tone="green" /><Kpi label="Conversão" value={`${stats.conversao}%`} tone="green" highlight /><Kpi label="Na fila" value={stats.fila} /><Kpi label="Retornos" value={stats.retornos} tone="gold" /></div>
         <div className="refresh-box"><button className="btn-refresh" onClick={() => carregarDados()} disabled={atualizando}><RefreshIcon />{atualizando ? 'Atualizando…' : 'Atualizar fila'}</button><div className="refresh-status">{ultimaAtualizacao ? `Atualizada às ${fmtHora(ultimaAtualizacao)}` : 'Aguardando dados'}</div></div>
-        <div className="operator"><div className="operator-avatar">SS</div><div><div className="operator-name">Suzana Santos</div><div className="operator-status">{fonteDados === 'Base_Geral' ? 'Base_Geral · conectada' : fonteDados === 'Supabase' ? 'fallback · Supabase' : pronto ? 'preparando ligação' : 'conectando dados'}</div></div></div>
+        <div className="operator"><div className="operator-avatar">SS</div><div><div className="operator-name">Suzana Santos</div><div className="operator-status">{fonteDados === 'Base_Geral' ? 'Base_Geral · conectada' : fonteDados === 'Supabase' ? 'fallback · Supabase' : pronto ? 'preparando ligação' : 'conectando dados'}</div></div><button className="logout-btn" onClick={sair}>Sair</button></div>
       </header>
 
       {erro && <div className="alert-error">{erro}</div>}

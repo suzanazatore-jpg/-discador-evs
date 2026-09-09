@@ -8,7 +8,7 @@
  * Publicação:
  * 1. Cole este arquivo em um novo projeto do Apps Script.
  * 2. Confirme o ID da planilha em DISC_ENV.SPREADSHEET_ID.
- * 3. Opcional: crie a propriedade DISCADOR_API_TOKEN.
+ * 3. Crie a propriedade DISCADOR_API_TOKEN (obrigatória).
  * 4. Deploy > New deployment > Web app > Execute as me > Anyone with the link.
  * 5. Use a URL gerada em BASE_GERAL_APPS_SCRIPT_URL no Vercel.
  */
@@ -114,9 +114,10 @@ function doPost(e) {
 
 function discAuthorize_(token) {
   var expected = PropertiesService.getScriptProperties().getProperty(DISC_ENV.tokenProperty);
-  // Se a propriedade não existir, o Web App continua funcionando para a
-  // primeira configuração. Depois de testar, recomenda-se criar o token.
-  if (expected && String(token || '') !== String(expected)) {
+  if (!expected) {
+    throw new Error('O token do Discador EVS ainda não foi configurado.');
+  }
+  if (String(token || '') !== String(expected)) {
     throw new Error('Token do Discador EVS inválido.');
   }
 }
