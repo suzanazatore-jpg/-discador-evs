@@ -88,8 +88,10 @@ e-mail e outras informações dos leads, o token é obrigatório.
    `BASE_GERAL_APPS_SCRIPT_TOKEN` na Vercel.
 5. Na Vercel, adicione `BASE_GERAL_APPS_SCRIPT_URL` com a URL publicada.
 6. Faça um novo deploy e valide a fila com a URL do painel.
-7. Mantenha `BASE_GERAL_REQUIRED=true` para impedir que o sistema volte
-   silenciosamente para o Supabase.
+7. Mantenha `BASE_GERAL_REQUIRED=true` para impedir que resultados de ligações
+   sejam gravados somente no Supabase quando a Base_Geral estiver indisponível.
+   As leituras da fila e do histórico usam o Supabase como contingência para o
+   painel continuar funcionando durante uma oscilação temporária do Apps Script.
 
 O endpoint usa `sheet_row` para atualizar a linha correta quando `ID_Lead`
 estiver vazio. A coluna R (`Pode_Ligar`) não é sobrescrita pelo discador.
