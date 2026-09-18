@@ -3,11 +3,47 @@ import twilio from 'twilio';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-function publicRequestUrl(request) {
+function requestUrlCandidates(request) {
   const incoming = new URL(request.url);
   const protocol = request.headers.get('x-forwarded-proto') || incoming.protocol.replace(':', '');
   const host = request.headers.get('x-forwarded-host') || request.headers.get('host') || incoming.host;
-  return `${protocol}://${host}${incoming.pathname}`;
+  const path = `${incoming.pathname}${incoming.search}`;
+  const urls = new Set([
+    incoming.toString(),
+    `${protocol}://${host}${path}`,
+  ]);
+
+  const configuredHosts = [
+    process.env.TWILIO_VOICE_URL,
+    process.env.VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.VERCEL_BRANCH_URL,
+    process.env.VERCEL_URL,
+  ].filter(Boolean);
+
+  for (const value of configuredHosts) {
+    const base = value.startsWith('http') ? value : `https://${value}`;
+
+    try {
+      const url = new URL(base);
+      url.pathname = incoming.pathname;
+      url.search = incoming.search;
+      urls.add(url.toString());
+    } catch {
+      // Ignora um valor malformado e continua com os enderecos da requisicao.
+    }
+  }
+
+  // A Twilio assina o endereco exatamente como ele foi cadastrado. A Vercel
+  // pode normalizar a barra final antes de entregar a requisicao ao Next.js.
+  for (const value of [...urls]) {
+    const url = new URL(value);
+    url.pathname = url.pathname.endsWith('/')
+      ? url.pathname.slice(0, -1)
+      : `${url.pathname}/`;
+    urls.add(url.toString());
+  }
+
+  return [...urls];
 }
 
 async function requestParams(request) {
@@ -24,17 +60,25 @@ async function requestParams(request) {
 }
 
 async function twilioRequestIsValid(request, params) {
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const signature = request.headers.get('x-twilio-signature');
+  const authToken = process.env.TWILIO_AUTH_TOKEN?.trim();
+  const signature = request.headers.get('x-twilio-signature')?.trim();
 
   if (!authToken || !signature) return false;
 
-  return twilio.validateRequest(
-    authToken,
-    signature,
-    publicRequestUrl(request),
-    params
+  const urls = requestUrlCandidates(request);
+  const valid = urls.some((url) =>
+    twilio.validateRequest(authToken, signature, url, params)
   );
+
+  if (!valid) {
+    console.error('Assinatura Twilio recusada para os enderecos esperados.', {
+      urls,
+      hasSignature: true,
+      hasAuthToken: true,
+    });
+  }
+
+  return valid;
 }
 
 // O Twilio chama esta rota quando o navegador inicia uma ligacao.
