@@ -11,6 +11,8 @@ export const runtime = 'nodejs';
 // Puxa a fila de leads pra ligar (view v_fila).
 export async function GET() {
   try {
+    let baseGeralFallback = false;
+
     if (isBaseGeralConfigured()) {
       try {
         const leads = await listarLeadsBaseGeral();
@@ -19,13 +21,11 @@ export async function GET() {
           { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Base_Geral' } }
         );
       } catch (sheetsError) {
-        console.error('Base_Geral indisponível; usando fallback Supabase:', sheetsError);
-        if (baseGeralMustBeAvailable()) {
-          return Response.json(
-            { error: sheetsError.message || 'Não foi possível ler a Base_Geral.' },
-            { status: 502, headers: { 'Cache-Control': 'no-store' } }
-          );
-        }
+        // A leitura da fila pode continuar pelo espelho no Supabase. O modo
+        // estrito permanece valendo para escritas em /api/ligacoes, evitando
+        // registrar um resultado somente em uma das bases.
+        baseGeralFallback = true;
+        console.warn('Base_Geral indisponível; lendo fila do fallback Supabase:', sheetsError);
       }
     } else if (baseGeralMustBeAvailable()) {
       return Response.json(
@@ -49,8 +49,18 @@ export async function GET() {
     }
 
     return Response.json(
-      { leads: data || [], source: 'Supabase' },
-      { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Supabase' } }
+      {
+        leads: data || [],
+        source: 'Supabase',
+        ...(baseGeralFallback ? { fallback: 'Base_Geral' } : {}),
+      },
+      {
+        headers: {
+          'Cache-Control': 'no-store',
+          'X-Discador-Source': 'Supabase',
+          ...(baseGeralFallback ? { 'X-Discador-Fallback': 'Base_Geral' } : {}),
+        },
+      }
     );
   } catch (error) {
     console.error('Erro inesperado na rota /api/fila:', error);
