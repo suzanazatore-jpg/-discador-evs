@@ -38,7 +38,7 @@ export async function GET() {
     const { data, error } = await supabaseAdmin
       .from('v_fila')
       .select('*')
-      .limit(100);
+      .limit(1000);
 
     if (error) {
       console.error('Erro ao carregar a fila do Supabase:', error);
