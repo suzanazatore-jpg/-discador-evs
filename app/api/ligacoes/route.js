@@ -12,6 +12,8 @@ export const runtime = 'nodejs';
 // Retorna o histórico para a aba Histórico do painel.
 export async function GET() {
   try {
+    let baseGeralFallback = false;
+
     if (isBaseGeralConfigured()) {
       try {
         const ligacoes = await listarHistoricoBaseGeral();
@@ -20,13 +22,8 @@ export async function GET() {
           { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Base_Geral' } }
         );
       } catch (sheetsError) {
-        console.error('Histórico da Base_Geral indisponível; usando fallback Supabase:', sheetsError);
-        if (baseGeralMustBeAvailable()) {
-          return Response.json(
-            { error: sheetsError.message || 'Não foi possível ler o histórico da Base_Geral.' },
-            { status: 502, headers: { 'Cache-Control': 'no-store' } }
-          );
-        }
+        baseGeralFallback = true;
+        console.warn('Histórico da Base_Geral indisponível; lendo fallback Supabase:', sheetsError);
       }
     } else if (baseGeralMustBeAvailable()) {
       return Response.json(
@@ -44,8 +41,18 @@ export async function GET() {
     if (error) throw new Error(error.message);
 
     return Response.json(
-      { ligacoes: data || [], source: 'Supabase' },
-      { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Supabase' } }
+      {
+        ligacoes: data || [],
+        source: 'Supabase',
+        ...(baseGeralFallback ? { fallback: 'Base_Geral' } : {}),
+      },
+      {
+        headers: {
+          'Cache-Control': 'no-store',
+          'X-Discador-Source': 'Supabase',
+          ...(baseGeralFallback ? { 'X-Discador-Fallback': 'Base_Geral' } : {}),
+        },
+      }
     );
   } catch (error) {
     console.error('Erro ao carregar histórico de ligações:', error);
