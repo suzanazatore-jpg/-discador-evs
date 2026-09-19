@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import base64
-import json
 import os
-import uuid
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
+
+import httpx
 
 
 class CalendarNotConfigured(RuntimeError):
@@ -14,78 +14,149 @@ class CalendarNotConfigured(RuntimeError):
 
 
 class CalendarService:
+    """Calendly-backed availability and booking for Suzana's diagnosis event."""
+
+    api_base = "https://api.calendly.com"
+
     def __init__(self) -> None:
-        self.calendar_id = os.getenv("GOOGLE_CALENDAR_ID", "").strip()
+        self.access_token = os.getenv("CALENDLY_ACCESS_TOKEN", "").strip()
+        self.event_type_uri = os.getenv("CALENDLY_EVENT_TYPE_URI", "").strip()
+        self.scheduling_url = os.getenv(
+            "CALENDLY_SCHEDULING_URL",
+            "https://calendly.com/suzanazatorreoficial/30min",
+        ).strip().rstrip("/")
+        self.event_type_slug = os.getenv("CALENDLY_EVENT_TYPE_SLUG", "30min").strip()
         self.timezone_name = os.getenv("AGENDA_TIMEZONE", "America/Sao_Paulo").strip()
         self.duration_minutes = int(os.getenv("DIAGNOSTICO_DURACAO_MINUTOS", "30"))
         self.buffer_minutes = int(os.getenv("AGENDA_ANTECEDENCIA_MINUTOS", "120"))
-        self.windows = self._load_windows()
-        self.credentials_info = self._load_credentials()
-        self._client = None
 
     @property
     def configured(self) -> bool:
-        return bool(self.calendar_id and self.credentials_info and self.windows)
-
-    def _load_credentials(self) -> dict[str, Any] | None:
-        raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-        encoded = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64", "").strip()
-        if encoded and not raw:
-            raw = base64.b64decode(encoded).decode("utf-8")
-        if not raw:
-            return None
-        return json.loads(raw)
-
-    def _load_windows(self) -> dict[str, list[list[str]]]:
-        raw = os.getenv("AGENDA_JANELAS_JSON", "").strip()
-        if not raw:
-            return {}
-        payload = json.loads(raw)
-        if not isinstance(payload, dict):
-            raise ValueError("AGENDA_JANELAS_JSON precisa ser um objeto JSON.")
-        return payload
-
-    def _service(self):
-        if not self.configured:
-            raise CalendarNotConfigured("A agenda da Suzana ainda não foi configurada.")
-        if self._client is None:
-            from google.oauth2 import service_account
-            from googleapiclient.discovery import build
-
-            credentials = service_account.Credentials.from_service_account_info(
-                self.credentials_info,
-                scopes=["https://www.googleapis.com/auth/calendar"],
-            )
-            self._client = build("calendar", "v3", credentials=credentials, cache_discovery=False)
-        return self._client
+        return bool(
+            self.access_token
+            and (self.event_type_uri or self.scheduling_url or self.event_type_slug)
+        )
 
     @property
     def timezone(self) -> ZoneInfo:
         return ZoneInfo(self.timezone_name)
 
-    def _busy_intervals(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
-        events = (
-            self._service()
-            .events()
-            .list(
-                calendarId=self.calendar_id,
-                timeMin=start.isoformat(),
-                timeMax=end.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
+    @property
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+
+    @staticmethod
+    def _utc_text(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _parse_datetime(value: str) -> datetime:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+    def _request(
+        self,
+        method: str,
+        path_or_url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not self.configured:
+            raise CalendarNotConfigured("O Calendly da Suzana ainda não foi conectado.")
+
+        url = (
+            path_or_url
+            if path_or_url.startswith("https://")
+            else f"{self.api_base}{path_or_url}"
+        )
+        with httpx.Client(timeout=20) as client:
+            response = client.request(
+                method,
+                url,
+                headers=self._headers,
+                params=params,
+                json=json,
             )
-            .execute()
-            .get("items", [])
+
+        if response.status_code in {401, 403}:
+            raise CalendarNotConfigured(
+                "A autorização do Calendly expirou ou não permite agendamentos."
+            )
+        if response.status_code in {409, 422}:
+            raise ValueError(
+                "O horário acabou de ser ocupado. Consulte a agenda novamente."
+            )
+        response.raise_for_status()
+        return response.json()
+
+    def _resolve_event_type_uri(self) -> str:
+        if self.event_type_uri:
+            return self.event_type_uri
+
+        current_user = self._request("GET", "/users/me").get("resource", {})
+        user_uri = current_user.get("uri", "")
+        if not user_uri:
+            raise CalendarNotConfigured(
+                "Não foi possível identificar a conta conectada ao Calendly."
+            )
+
+        page_token = ""
+        expected_url = self.scheduling_url.lower().rstrip("/")
+        expected_slug = (
+            self.event_type_slug.lower()
+            or urlparse(self.scheduling_url).path.rstrip("/").split("/")[-1].lower()
         )
 
-        busy: list[tuple[datetime, datetime]] = []
-        for event in events:
-            start_value = event.get("start", {}).get("dateTime")
-            end_value = event.get("end", {}).get("dateTime")
-            if not start_value or not end_value:
-                continue
-            busy.append((datetime.fromisoformat(start_value), datetime.fromisoformat(end_value)))
-        return busy
+        while True:
+            params: dict[str, Any] = {
+                "user": user_uri,
+                "active": "true",
+                "count": 100,
+            }
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._request("GET", "/event_types", params=params)
+
+            for event_type in payload.get("collection", []):
+                event_url = str(event_type.get("scheduling_url", "")).lower().rstrip("/")
+                event_slug = str(event_type.get("slug", "")).lower()
+                url_slug = urlparse(event_url).path.rstrip("/").split("/")[-1]
+                if (
+                    (expected_url and event_url == expected_url)
+                    or (expected_slug and event_slug == expected_slug)
+                    or (expected_slug and url_slug == expected_slug)
+                ):
+                    self.event_type_uri = str(event_type.get("uri", ""))
+                    if self.event_type_uri:
+                        return self.event_type_uri
+
+            page_token = str(payload.get("pagination", {}).get("next_page_token", ""))
+            if not page_token:
+                break
+
+        raise CalendarNotConfigured(
+            "O evento de 30 minutos não foi encontrado na conta conectada ao Calendly."
+        )
+
+    def _available_times(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> list[dict[str, Any]]:
+        event_type_uri = self._resolve_event_type_uri()
+        payload = self._request(
+            "GET",
+            "/event_type_available_times",
+            params={
+                "event_type": event_type_uri,
+                "start_time": self._utc_text(start),
+                "end_time": self._utc_text(end),
+            },
+        )
+        return list(payload.get("collection", []))
 
     def list_slots(
         self,
@@ -95,47 +166,53 @@ class CalendarService:
         limit: int = 8,
     ) -> list[dict[str, str]]:
         if not self.configured:
-            raise CalendarNotConfigured("A agenda da Suzana ainda não foi configurada.")
+            raise CalendarNotConfigured("O Calendly da Suzana ainda não foi conectado.")
 
         now = datetime.now(self.timezone)
         first_day = date.fromisoformat(start_date) if start_date else now.date()
         range_start = datetime.combine(first_day, time.min, self.timezone)
-        range_end = range_start + timedelta(days=max(1, min(days, 30)))
-        busy = self._busy_intervals(range_start, range_end)
         earliest = now + timedelta(minutes=self.buffer_minutes)
-        duration = timedelta(minutes=self.duration_minutes)
+        if range_start < earliest:
+            range_start = earliest
+        range_end = datetime.combine(
+            first_day + timedelta(days=max(1, min(days, 30))),
+            time.min,
+            self.timezone,
+        )
         period_normalized = str(period or "qualquer").lower()
 
         slots: list[dict[str, str]] = []
-        current_day = first_day
-        while current_day < range_end.date() and len(slots) < limit:
-            windows = self.windows.get(str(current_day.weekday()), [])
-            for begin_text, end_text in windows:
-                begin_time = time.fromisoformat(begin_text)
-                end_time = time.fromisoformat(end_text)
-                cursor = datetime.combine(current_day, begin_time, self.timezone)
-                window_end = datetime.combine(current_day, end_time, self.timezone)
+        cursor = range_start
+        # Calendly limits each availability query to a seven-day window.
+        while cursor < range_end and len(slots) < limit:
+            window_end = min(cursor + timedelta(days=7), range_end)
+            for item in self._available_times(cursor, window_end):
+                start_value = str(item.get("start_time", ""))
+                if not start_value:
+                    continue
+                start = self._parse_datetime(start_value).astimezone(self.timezone)
+                if period_normalized == "manha" and start.hour >= 12:
+                    continue
+                if period_normalized == "tarde" and start.hour < 12:
+                    continue
 
-                while cursor + duration <= window_end and len(slots) < limit:
-                    if period_normalized == "manha" and cursor.hour >= 12:
-                        cursor += duration
-                        continue
-                    if period_normalized == "tarde" and cursor.hour < 12:
-                        cursor += duration
-                        continue
+                end_value = str(item.get("end_time", ""))
+                end = (
+                    self._parse_datetime(end_value).astimezone(self.timezone)
+                    if end_value
+                    else start + timedelta(minutes=self.duration_minutes)
+                )
+                slots.append(
+                    {
+                        "inicio": start.isoformat(),
+                        "fim": end.isoformat(),
+                        "descricao": start.strftime("%d/%m/%Y às %H:%M"),
+                    }
+                )
+                if len(slots) >= limit:
+                    break
+            cursor = window_end
 
-                    end_slot = cursor + duration
-                    collision = any(cursor < busy_end and end_slot > busy_start for busy_start, busy_end in busy)
-                    if cursor >= earliest and not collision:
-                        slots.append(
-                            {
-                                "inicio": cursor.isoformat(),
-                                "fim": end_slot.isoformat(),
-                                "descricao": cursor.strftime("%d/%m/%Y às %H:%M"),
-                            }
-                        )
-                    cursor += duration
-            current_day += timedelta(days=1)
         return slots
 
     def create_meeting(
@@ -147,52 +224,58 @@ class CalendarService:
         lead_id: str,
         challenge: str = "",
     ) -> dict[str, str]:
-        start = datetime.fromisoformat(start_iso).astimezone(self.timezone)
-        end = start + timedelta(minutes=self.duration_minutes)
+        del lead_id, challenge  # These remain recorded in the Discador/Base Geral.
+        if not email:
+            raise ValueError("É necessário confirmar o e-mail antes de agendar.")
 
-        busy = self._busy_intervals(start, end)
-        if any(start < busy_end and end > busy_start for busy_start, busy_end in busy):
+        start = datetime.fromisoformat(start_iso).astimezone(self.timezone)
+        probe_start = start - timedelta(minutes=1)
+        probe_end = start + timedelta(minutes=self.duration_minutes + 1)
+        available = self._available_times(probe_start, probe_end)
+        exact_slot = any(
+            self._parse_datetime(str(item.get("start_time", ""))).astimezone(self.timezone)
+            == start
+            for item in available
+            if item.get("start_time")
+        )
+        if not exact_slot:
             raise ValueError("O horário acabou de ser ocupado. Consulte a agenda novamente.")
 
-        body: dict[str, Any] = {
-            "summary": f"Diagnóstico gratuito — {name}",
-            "description": (
-                "Diagnóstico gratuito de 30 minutos com Suzana Zatorre.\n"
-                f"Lead: {lead_id}\n"
-                f"Desafio: {challenge or 'não informado'}"
-            ),
-            "start": {"dateTime": start.isoformat(), "timeZone": self.timezone_name},
-            "end": {"dateTime": end.isoformat(), "timeZone": self.timezone_name},
-            "conferenceData": {
-                "createRequest": {
-                    "requestId": uuid.uuid4().hex,
-                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
-                }
+        event_type_uri = self._resolve_event_type_uri()
+        payload = self._request(
+            "POST",
+            "/invitees",
+            json={
+                "event_type": event_type_uri,
+                "start_time": self._utc_text(start),
+                "invitee": {
+                    "name": name,
+                    "email": email,
+                    "timezone": self.timezone_name,
+                },
             },
-        }
-        if email:
-            body["attendees"] = [{"email": email, "displayName": name}]
-
-        event = (
-            self._service()
-            .events()
-            .insert(
-                calendarId=self.calendar_id,
-                body=body,
-                conferenceDataVersion=1,
-                sendUpdates="all" if email else "none",
-            )
-            .execute()
         )
-        meet_url = event.get("hangoutLink", "")
-        if not event.get("id") or not meet_url:
-            raise RuntimeError("O Google Calendar não confirmou a criação do Google Meet.")
+        invitee = payload.get("resource", {})
+        event_uri = str(invitee.get("event", ""))
+        if not invitee.get("uri") or not event_uri:
+            raise RuntimeError("O Calendly não confirmou a criação do agendamento.")
 
+        meet_url = ""
+        try:
+            event = self._request("GET", event_uri).get("resource", {})
+            location = event.get("location") or {}
+            meet_url = str(location.get("join_url", ""))
+        except Exception:
+            # The invite email still contains the meeting details even if the join
+            # URL is not immediately available from the conference provider.
+            meet_url = ""
+
+        end = start + timedelta(minutes=self.duration_minutes)
         return {
-            "event_id": event["id"],
+            "event_id": event_uri.rstrip("/").split("/")[-1],
+            "invitee_id": str(invitee.get("uri", "")).rstrip("/").split("/")[-1],
             "inicio": start.isoformat(),
             "fim": end.isoformat(),
             "meet_url": meet_url,
-            "html_link": event.get("htmlLink", ""),
+            "html_link": str(invitee.get("reschedule_url", "")),
         }
-
