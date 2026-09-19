@@ -162,7 +162,7 @@ async def criar_agendamento(
     data_hora: str,
     desafio: str = "",
 ) -> dict[str, Any]:
-    """Cria o diagnóstico no Google Calendar e devolve o link do Google Meet."""
+    """Agenda o diagnóstico de 30 minutos no Calendly da Suzana."""
     try:
         context = _lead_context(lead_id)
         if context.appointment_at and context.meet_url:
@@ -208,7 +208,7 @@ async def registrar_resultado(
     if normalized not in RESULTS:
         return {"sucesso": False, "erro": "Resultado inválido."}
 
-    # Um Google Meet confirmado tem precedência sobre classificações posteriores.
+    # Um agendamento confirmado tem precedência sobre classificações posteriores.
     if context.result != "agendado":
         context.result = normalized
     context.summary = str(resumo or "").strip()[:2000]
@@ -370,7 +370,7 @@ async def health() -> dict[str, Any]:
         "agente": "Ana",
         "enabled": _agent_enabled(),
         "mode": os.getenv("VOICE_AGENT_MODE", "test"),
-        "calendar_configured": calendar.configured,
+        "calendly_configured": calendar.configured,
     }
 
 
@@ -410,4 +410,3 @@ async def start_call(request: StartCallRequest) -> dict[str, Any]:
 
 if __name__ == "__main__":
     server.start()
-
