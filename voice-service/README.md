@@ -3,7 +3,8 @@
 Serviço persistente que conecta Twilio Agent Connect ao GPT-Live. Ele não
 substitui o painel Next.js: o painel seleciona e valida o lead; este serviço
 mantém o áudio da chamada, executa as ferramentas da agenda e devolve o
-resultado à Base Geral.
+resultado à Base Geral. A disponibilidade e os agendamentos usam o evento
+oficial de 30 minutos da Suzana no Calendly.
 
 ## Segurança inicial
 
@@ -30,6 +31,19 @@ Depois, configure na Vercel:
 
 Valide `GET /health`. A primeira chamada deve ser feita em modo `test`, para
 um número que esteja explicitamente em `VOICE_AGENT_TEST_NUMBERS`.
+
+## Calendly
+
+Configure `CALENDLY_ACCESS_TOKEN` como segredo no serviço e mantenha:
+
+- `CALENDLY_SCHEDULING_URL=https://calendly.com/suzanazatorreoficial/30min`
+- `CALENDLY_EVENT_TYPE_SLUG=30min`
+- `AGENDA_TIMEZONE=America/Sao_Paulo`
+
+A Ana consulta apenas os horários que o próprio Calendly retorna como livres.
+Antes de reservar, ela verifica novamente a disponibilidade. O Calendly envia
+ao e-mail confirmado pela lead o convite e o link da reunião configurado no
+tipo de evento.
 
 ## Gatilho automático do Pabbly
 

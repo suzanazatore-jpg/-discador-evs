@@ -112,7 +112,7 @@ O código do serviço persistente está em `voice-service/`. Ele faz quatro cois
 
 1. recebe somente um lead já validado pelo Discador EVS;
 2. inicia a chamada pela Twilio e conecta o áudio ao GPT-Live;
-3. consulta e cria o diagnóstico na agenda Google, com Google Meet;
+3. consulta e cria o diagnóstico no evento oficial de 30 minutos do Calendly;
 4. devolve o resultado e o resumo para a Base Geral.
 
 A automação parte do Pabbly. Depois de incluir/atualizar o lead selecionado na
