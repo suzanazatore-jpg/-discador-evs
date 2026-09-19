@@ -5,6 +5,12 @@ const PUBLIC_PATHS = new Set([
   '/api/auth/login',
   '/api/auth/logout',
   '/api/auth/session',
+  // O serviço privado da Ana devolve o resultado sem cookie do navegador.
+  // A própria rota exige o segredo AGENTE_VOZ_SECRET.
+  '/api/agente/resultado',
+  // Gatilho do Pabbly. A rota valida AGENTE_VOZ_WEBHOOK_SECRET e relê o lead
+  // diretamente da Base Geral antes de iniciar qualquer chamada.
+  '/api/agente/webhook',
   // O Twilio chama esta rota no servidor, sem o cookie do navegador. A rota
   // valida a assinatura do Twilio antes de devolver qualquer instrução.
   '/api/voice',

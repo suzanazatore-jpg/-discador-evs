@@ -56,6 +56,10 @@ function normalizarLead(raw, index) {
     numeroVendedores: valorDe(raw, ['numero_vendedores', 'numeroVendedores', 'vendedores', 'Vendedor']) || '',
     dezDias: valorDe(raw, ['dez_dias', 'dezDias', 'ficar_10_dias_fora', 'Ficar 10 Dias fora']) || '',
     desafio: valorDe(raw, ['desafio', 'dor', 'Desafio']) || '',
+    estoque: valorDe(raw, ['estoque', 'Estoque']) || '',
+    produto: valorDe(raw, ['produto', 'Produto']) || '',
+    dataCompra: valorDe(raw, ['data_compra', 'dataCompra', 'Data_Compra']) || '',
+    equipe: valorDe(raw, ['equipe', 'Equipe']) || '',
     origem: valorDe(raw, ['origem', 'Origem', 'etiqueta', 'Etiqueta']) || '',
     etiqueta: valorDe(raw, ['etiqueta', 'Etiqueta']) || '',
     status: normalizarTexto(valorDe(raw, ['status', 'Status']) || 'novo'),
@@ -76,7 +80,13 @@ function leadBloqueado(lead) {
   const status = normalizarTexto(lead.status);
   const tags = [...(lead.tags || []), lead.tagsPabbly, lead.etiqueta, lead.motivoBloqueio].filter(Boolean).map((tag) => normalizarTexto(tag).replace(/[\s-]+/g, '_'));
   const podeLigar = normalizarTexto(lead.podeLigar).replace(/[\s-]+/g, '_');
-  return ['vendido', 'descartado', 'nao_ligar', 'limite_tentativas'].includes(status) || tags.some((tag) => tag.includes('nao_ligar')) || ['nao', 'nao_ligar'].includes(podeLigar) || lead.podeLigar === false;
+  const bloqueios = ['nao_ligar', 'nao_deseja_contato', 'agendou_mentoria_meet', 'diagnostico_agendado', 'mentoria_impulso', 'vendido'];
+  return ['vendido', 'agendado', 'agendou', 'descartado', 'nao_ligar', 'limite_tentativas'].includes(status) ||
+    tags.some((tag) => bloqueios.some((bloqueio) => tag.includes(bloqueio))) ||
+    normalizarTexto(lead.produto).replace(/[\s-]+/g, '_').includes('mentoria_impulso') ||
+    Boolean(lead.dataAgendamento) ||
+    ['nao', 'nao_ligar'].includes(podeLigar) ||
+    lead.podeLigar === false;
 }
 
 function leadElegivel(lead) {

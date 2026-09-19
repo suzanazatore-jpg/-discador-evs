@@ -1,7 +1,9 @@
 # Discador EVS
 
-Discador de ligações no navegador para a Equipe que Vende Sozinha.
-Stack: Next.js + Twilio Voice (navegador) + Supabase.
+Discador de ligações para a Equipe que Vende Sozinha.
+Stack: Next.js + Twilio Voice + Base Geral/Supabase. O modo humano continua no
+navegador e a Ana funciona em um serviço separado com Twilio Agent Connect e
+GPT-Live.
 
 A vendedora abre o app, vê a fila de leads, clica em "Ligar", fala pelo
 headset direto no navegador, marca o resultado, e o sistema pula pro
@@ -103,6 +105,26 @@ estiver vazio. A coluna R (`Pode_Ligar`) não é sobrescrita pelo discador.
 3. Clique em "Ligar agora". Fale pelo headset. Marque o resultado.
 
 Pronto — o discador está no ar. 🎉
+
+## Parte J — Ana, agente de voz
+
+O código do serviço persistente está em `voice-service/`. Ele faz quatro coisas:
+
+1. recebe somente um lead já validado pelo Discador EVS;
+2. inicia a chamada pela Twilio e conecta o áudio ao GPT-Live;
+3. consulta e cria o diagnóstico na agenda Google, com Google Meet;
+4. devolve o resultado e o resumo para a Base Geral.
+
+A automação parte do Pabbly. Depois de incluir/atualizar o lead selecionado na
+Base Geral, ele chama `POST /api/agente/webhook`, enviando `id_lead`. A rota
+relê os dados na planilha e bloqueia a chamada quando `Pode_Ligar` não for SIM,
+quando já existir agendamento, quando houver pedido de não contato, venda,
+Mentoria Impulso ou outra marca impeditiva.
+
+Por segurança, a Ana nasce desligada. O primeiro teste usa
+`VOICE_AGENT_MODE=test` e aceita somente números listados explicitamente em
+`VOICE_AGENT_TEST_NUMBERS`. A liberação da base exige duas ações conscientes:
+`VOICE_AGENT_MODE=production` e `ALLOW_PRODUCTION_CALLS=true`.
 
 ## Parte I — Proteger o painel com login
 
