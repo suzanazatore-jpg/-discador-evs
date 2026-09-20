@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { normalizarIdLead } from '@/lib/lead-id';
 import { iniciarLigacaoAna } from '@/lib/voice-agent-server';
 
 export const dynamic = 'force-dynamic';
@@ -26,7 +27,7 @@ export async function POST(request) {
 
     const body = await request.json();
     const payload = await iniciarLigacaoAna({
-      requestedId: String(body.lead_id || body.id_lead || body.ID_Lead || ''),
+      requestedId: normalizarIdLead(body.lead_id || body.id_lead || body.ID_Lead),
       requestedRow: Number(body.sheet_row || body.linha || 0),
     });
 
@@ -39,4 +40,3 @@ export async function POST(request) {
     );
   }
 }
-
