@@ -18,6 +18,39 @@ function webhookAutorizado(request) {
   );
 }
 
+async function diagnosticarServicoVoz() {
+  if (!process.env.AGENTE_VOZ_API_URL) {
+    return { online: false, erro: 'AGENTE_VOZ_API_URL não configurada.' };
+  }
+
+  try {
+    const endpoint = new URL('/health', process.env.AGENTE_VOZ_API_URL).toString();
+    const response = await fetch(endpoint, { cache: 'no-store' });
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = {};
+    }
+
+    return {
+      online: response.ok,
+      status_http: response.status,
+      agente_habilitada: payload.enabled ?? null,
+      modo: payload.mode ?? null,
+      calendly_configurado: payload.calendly_configured ?? null,
+    };
+  } catch (error) {
+    return {
+      online: false,
+      erro: String(error?.message || error || 'Falha ao consultar o serviço de voz')
+        .replace(/\s+/g, ' ')
+        .slice(0, 300),
+    };
+  }
+}
+
 // Diagnostica a leitura da Base_Geral sem iniciar ligação.
 export async function POST(request) {
   try {
@@ -37,6 +70,8 @@ export async function POST(request) {
       );
     });
 
+    const servicoVoz = await diagnosticarServicoVoz();
+
     return Response.json(
       {
         ok: true,
@@ -47,6 +82,7 @@ export async function POST(request) {
         lead_encontrado: Boolean(lead),
         id_encontrado: lead ? normalizarIdLead(lead.id_lead || lead.id) : null,
         linha_encontrada: lead?.sheet_row || null,
+        servico_voz: servicoVoz,
       },
       { headers: { 'Cache-Control': 'no-store' } }
     );
