@@ -132,6 +132,14 @@ def _phone_allowed(phone: str) -> bool:
     return phone in allowed
 
 
+def _safe_error_message(error: Exception) -> str:
+    """Mantém o diagnóstico útil sem devolver credenciais ou SIDs."""
+    message = str(error or "").strip() or error.__class__.__name__
+    message = re.sub(r"\b(?:AC|SK)[0-9a-fA-F]{32}\b", "[identificador oculto]", message)
+    message = re.sub(r"(?i)bearer\s+\S+", "Bearer [oculto]", message)
+    return re.sub(r"\s+", " ", message).strip()[:500]
+
+
 def _lead_context(lead_id: str) -> CallContext:
     context = lead_contexts.get(str(lead_id))
     if context is None or context.finalized:
@@ -400,7 +408,15 @@ async def start_call(request: StartCallRequest) -> dict[str, Any]:
             status_callback_event=["initiated", "ringing", "answered", "completed"],
         ),
     )
-    result = await voice_channel.initiate_outbound_conversation(options)
+    try:
+        result = await voice_channel.initiate_outbound_conversation(options)
+    except Exception as error:
+        detail = _safe_error_message(error)
+        print(f"Falha ao iniciar chamada no Twilio: {error.__class__.__name__}: {detail}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Falha ao iniciar chamada no Twilio: {detail}",
+        ) from error
     context = CallContext(lead=lead, call_sid=result.call_sid)
     call_contexts[result.call_sid] = context
     lead_contexts[lead.id] = context
