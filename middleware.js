@@ -11,6 +11,9 @@ const PUBLIC_PATHS = new Set([
   // Gatilho do Pabbly. A rota valida AGENTE_VOZ_WEBHOOK_SECRET e relê o lead
   // diretamente da Base Geral antes de iniciar qualquer chamada.
   '/api/agente/webhook',
+  // Diagnóstico do Pabbly. Usa o mesmo segredo do webhook, mas apenas confere
+  // se o lead pode ser lido da Base Geral; nunca inicia uma chamada.
+  '/api/agente/diagnostico',
   // O Twilio chama esta rota no servidor, sem o cookie do navegador. A rota
   // valida a assinatura do Twilio antes de devolver qualquer instrução.
   '/api/voice',
