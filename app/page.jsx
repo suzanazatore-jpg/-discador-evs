@@ -96,7 +96,7 @@ function leadElegivel(lead) {
 function safeStorageRead(key, fallback) { try { if (typeof window === 'undefined') return fallback; const value = window.localStorage.getItem(key); return value ? JSON.parse(value) : fallback; } catch (_) { return fallback; } }
 function safeStorageWrite(key, value) { try { if (typeof window !== 'undefined') window.localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} }
 function mensagemErro(error, fallback) { if (!error) return fallback; const code = error.code ? `[${error.code}] ` : ''; return `${code}${error.message || error.description || fallback}`; }
-async function obterToken() { const response = await fetch('/api/token', { cache: 'no-store' }); const body = await response.json().catch(() => ({})); if (!response.ok || !body.token) throw new Error(body.error || 'O servidor não conseguiu gerar o token do Twilio.'); return body.token; }
+async function obterToken() { const response = await fetch('/api/token', { cache: 'no-store' }); if (response.status === 401) { window.location.assign('/login'); throw new Error('Sessão expirada. Entre novamente.'); } const body = await response.json().catch(() => ({})); if (!response.ok || !body.token) throw new Error(body.error || 'O servidor não conseguiu gerar o token do Twilio.'); return body.token; }
 function normalizarLigacao(raw, index) { return { id: raw.id ?? `local-${index}`, lead_id: raw.lead_id ?? raw.leadId, resultado: raw.resultado || '', duracao_seg: Number(raw.duracao_seg ?? raw.duracao ?? 0), nota: raw.nota || raw.obs || '', tentativa: Number(raw.tentativa || 0), created_at: raw.created_at || raw.ts || new Date().toISOString() }; }
 function proximaAcaoDe(resultado) { if (resultado === 'reuniao') return 'Aguardar reunião'; if (resultado === 'interessado' || resultado === 'retornar') return 'Retornar contato'; if (resultado === 'nao_atendeu' || resultado === 'caixa') return 'Tentar novamente'; return 'Sem ação'; }
 
@@ -176,6 +176,11 @@ export default function DiscadorEVS() {
         fetch('/api/fila', { cache: 'no-store' }),
         fetch('/api/ligacoes', { cache: 'no-store' }),
       ]);
+
+      if (filaResponse.status === 401 || ligacoesResponse.status === 401) {
+        window.location.assign('/login');
+        return;
+      }
 
       const filaBody = await filaResponse.json().catch(() => ({}));
       if (!filaResponse.ok || filaBody.error) {
@@ -326,8 +331,14 @@ export default function DiscadorEVS() {
       });
 
       call.on('error', (error) => {
-        manualHangupRef.current = true;
         setErro('Erro na ligação: ' + mensagemErro(error, 'erro desconhecido'));
+        callRef.current = null;
+
+        if (!manualHangupRef.current && !callAcceptedRef.current && autoAtivoRef.current && !autoPausadoRef.current) {
+          registrarNaoAtendimentoAutomatico(target);
+          return;
+        }
+
         setEstado('wrapup');
       });
     } catch (error) {
@@ -406,6 +417,11 @@ export default function DiscadorEVS() {
         }),
       });
 
+      if (response.status === 401) {
+        window.location.assign('/login');
+        return;
+      }
+
       const body = await response.json().catch(() => ({}));
       if (!response.ok || body.error) {
         throw new Error(body.error || 'Não foi possível salvar o resultado.');
@@ -449,6 +465,44 @@ export default function DiscadorEVS() {
       }
     } catch (error) {
       setErro(mensagemErro(error, 'Não foi possível salvar o resultado da ligação.'));
+
+      // Nunca deixa o painel preso em "Ligação encerrada" se o salvamento falhar.
+      setNota('');
+      setSeg(0);
+      sidRef.current = null;
+      setResultadoPendente(null);
+      setDataProxima('');
+      setHoraProxima('');
+      setErroResultado('');
+      setEstado('idle');
+      callRef.current = null;
+      manualHangupRef.current = false;
+      automaticRecordingRef.current = false;
+
+      // No modo automático, pula o lead que acabou de falhar e segue para o próximo
+      // em vez de exigir F5 ou novo login manual.
+      if (autoAtivoRef.current && !autoPausadoRef.current) {
+        const candidatosFalha = leads.filter(
+          (item) => leadElegivel(item) && String(item.id) !== String(leadAtual.id)
+        );
+        const proximoFalha = candidatosFalha[0] || null;
+
+        clearTimeout(nextTimerRef.current);
+
+        if (proximoFalha) {
+          setActiveId(proximoFalha.id);
+          nextTimerRef.current = setTimeout(
+            () => chamarLead(proximoFalha),
+            AUTO_NEXT_DELAY_MS
+          );
+        } else {
+          nextTimerRef.current = setTimeout(
+            () => carregarDados({ silencioso: true }),
+            1500
+          );
+        }
+      }
+
       return;
     }
 
