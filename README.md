@@ -92,8 +92,8 @@ e-mail e outras informações dos leads, o token é obrigatório.
 6. Faça um novo deploy e valide a fila com a URL do painel.
 7. Mantenha `BASE_GERAL_REQUIRED=true` para impedir que resultados de ligações
    sejam gravados somente no Supabase quando a Base_Geral estiver indisponível.
-   As leituras da fila e do histórico usam o Supabase como contingência para o
-   painel continuar funcionando durante uma oscilação temporária do Apps Script.
+   No modo estrito, fila, histórico e gravação dependem da Base_Geral. O
+   espelho Supabase só é usado quando a contingência estiver explicitamente habilitada.
 
 O endpoint usa `sheet_row` para atualizar a linha correta quando `ID_Lead`
 estiver vazio. A coluna R (`Pode_Ligar`) não é sobrescrita pelo discador.
@@ -163,3 +163,9 @@ da Vercel e nas propriedades protegidas do Apps Script.
   /api/voice da sua URL da Vercel (Parte F) e está como POST.
 - "Nenhum lead na fila": adicione leads no Supabase com status 'novo'.
 - Sem áudio: confira a permissão de microfone do navegador (use Chrome/Edge).
+
+## Correção de continuidade — setembro de 2026
+
+Veja [a auditoria, os testes e a ordem de publicação](docs/AUDITORIA-2026-09-30.md).
+Atualize o Apps Script antes de publicar o painel com salvamento recuperável.
+Execute `npm test` e `npm run build`.

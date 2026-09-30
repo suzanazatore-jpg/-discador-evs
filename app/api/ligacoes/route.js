@@ -22,6 +22,10 @@ export async function GET() {
           { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Base_Geral' } }
         );
       } catch (sheetsError) {
+        if (baseGeralMustBeAvailable()) {
+          return Response.json({ error: sheetsError.message || 'Base_Geral indisponível.' },
+            { status: 503, headers: { 'Cache-Control': 'no-store' } });
+        }
         baseGeralFallback = true;
         console.warn('Histórico da Base_Geral indisponível; lendo fallback Supabase:', sheetsError);
       }
@@ -68,6 +72,7 @@ export async function POST(request) {
   try {
     const body = await request.json();
     const {
+      event_id,
       lead_id,
       id_lead,
       sheet_row,
@@ -93,6 +98,7 @@ export async function POST(request) {
     if (isBaseGeralConfigured()) {
       try {
         const sheetsResult = await registrarLigacaoBaseGeral({
+          event_id,
           lead_id,
           id_lead: id_lead || lead_id,
           sheet_row,
@@ -122,7 +128,7 @@ export async function POST(request) {
           { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Base_Geral' } }
         );
       } catch (sheetsError) {
-        console.error('Base_Geral indisponível; salvando resultado no fallback Supabase:', sheetsError);
+        console.error('Falha ao salvar o resultado na Base_Geral:', sheetsError);
         if (baseGeralMustBeAvailable()) {
           return Response.json(
             { error: sheetsError.message || 'Não foi possível atualizar a Base_Geral.' },
@@ -135,6 +141,11 @@ export async function POST(request) {
         { error: 'BASE_GERAL_APPS_SCRIPT_URL não foi configurada.' },
         { status: 503, headers: { 'Cache-Control': 'no-store' } }
       );
+    }
+
+    if (event_id) {
+      return Response.json({ error: 'O salvamento recuperável exige a Base_Geral configurada.' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
 
     const supabaseAdmin = getSupabaseAdmin();

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { readCallOutcome } from '@/lib/call-outcome.mjs';
 
 const C = {
   vinho: '#6A1F32', vinhoEscuro: '#4E1626', vinhoClaro: '#7C2A3E',
@@ -12,6 +13,7 @@ const C = {
 const MAX_TENTATIVAS = 3;
 const AUTO_NEXT_DELAY_MS = 900;
 const AUTO_REFRESH_MS = 30000;
+const PENDING_KEY = 'discador_evs_resultado_pendente_v1';
 const OUTBOX_KEY = 'discador_evs_kabam_outbox_v1';
 
 const RESULTADOS = [
@@ -96,12 +98,21 @@ function leadElegivel(lead) {
 function safeStorageRead(key, fallback) { try { if (typeof window === 'undefined') return fallback; const value = window.localStorage.getItem(key); return value ? JSON.parse(value) : fallback; } catch (_) { return fallback; } }
 function safeStorageWrite(key, value) { try { if (typeof window !== 'undefined') window.localStorage.setItem(key, JSON.stringify(value)); } catch (_) {} }
 function mensagemErro(error, fallback) { if (!error) return fallback; const code = error.code ? `[${error.code}] ` : ''; return `${code}${error.message || error.description || fallback}`; }
-async function obterToken() { const response = await fetch('/api/token', { cache: 'no-store' }); if (response.status === 401) { window.location.assign('/login'); throw new Error('Sessão expirada. Entre novamente.'); } const body = await response.json().catch(() => ({})); if (!response.ok || !body.token) throw new Error(body.error || 'O servidor não conseguiu gerar o token do Twilio.'); return body.token; }
+async function obterToken() { const response = await fetch('/api/token', { cache: 'no-store', signal: AbortSignal.timeout(15000) }); if (response.status === 401) { window.location.assign('/login'); throw new Error('Sessão expirada. Entre novamente.'); } const body = await response.json().catch(() => ({})); if (!response.ok || !body.token) throw new Error(body.error || 'O servidor não conseguiu gerar o token do Twilio.'); return body.token; }
 function normalizarLigacao(raw, index) { return { id: raw.id ?? `local-${index}`, lead_id: raw.lead_id ?? raw.leadId, resultado: raw.resultado || '', duracao_seg: Number(raw.duracao_seg ?? raw.duracao ?? 0), nota: raw.nota || raw.obs || '', tentativa: Number(raw.tentativa || 0), created_at: raw.created_at || raw.ts || new Date().toISOString() }; }
 function proximaAcaoDe(resultado) { if (resultado === 'reuniao') return 'Aguardar reunião'; if (resultado === 'interessado' || resultado === 'retornar') return 'Retornar contato'; if (resultado === 'nao_atendeu' || resultado === 'caixa') return 'Tentar novamente'; return 'Sem ação'; }
 
 export default function DiscadorEVS() {
   const [leads, setLeads] = useState([]);
+  const [salvando, setSalvando] = useState(false);
+  const [pendente, setPendente] = useState(null);
+  const [deviceRetry, setDeviceRetry] = useState(0);
+  const leadsRef = useRef([]);
+  const registrarRef = useRef(null);
+  const chamarRef = useRef(null);
+  const saveRef = useRef(false);
+  const pendingRef = useRef(null);
+  const dialingRef = useRef(false);
   const [activeId, setActiveId] = useState(null);
   const [historico, setHistorico] = useState([]);
   const [estado, setEstado] = useState('idle');
@@ -128,6 +139,9 @@ export default function DiscadorEVS() {
   const callRef = useRef(null);
   const timerRef = useRef(null);
   const nextTimerRef = useRef(null);
+  const statusTimerRef = useRef(null);
+  const callGenerationRef = useRef(0);
+  const dataRevisionRef = useRef(0);
   const sidRef = useRef(null);
   const refreshRef = useRef(false);
   const callAcceptedRef = useRef(false);
@@ -135,6 +149,8 @@ export default function DiscadorEVS() {
   const manualHangupRef = useRef(false);
   const autoAtivoRef = useRef(false);
   const autoPausadoRef = useRef(true);
+
+  leadsRef.current = leads;
 
   const filaElegivel = useMemo(() => leads.filter(leadElegivel), [leads]);
   const filaVisivel = useMemo(() => {
@@ -150,7 +166,7 @@ export default function DiscadorEVS() {
     });
   }, [filaElegivel, busca, filtroFila]);
 
-  const lead = leads.find((item) => String(item.id) === String(activeId)) || filaElegivel[0] || leads[0] || null;
+  const lead = pendente?.lead || leads.find((item) => String(item.id) === String(activeId)) || filaElegivel[0] || leads[0] || null;
   const histLead = historico.filter((item) => String(item.lead_id) === String(lead?.id));
   const histExibido = escopoHistorico === 'lead' ? histLead : historico;
   const bloqueado = leadBloqueado(lead);
@@ -162,19 +178,31 @@ export default function DiscadorEVS() {
     return { feitas, atendidas, agendamentos, tempo, atendimento: feitas ? Math.round((atendidas / feitas) * 100) : 0, conversao: atendidas ? Math.round((agendamentos / atendidas) * 100) : 0, fila: filaElegivel.length, retornos: filaElegivel.filter((item) => item.status === 'retornar').length };
   }, [historico, hoje, filaElegivel]);
 
+  useEffect(() => {
+    const saved = safeStorageRead(PENDING_KEY, null);
+    if (saved?.payload?.event_id && saved?.lead) {
+      pendingRef.current = saved;
+      setPendente(saved);
+      setActiveId(saved.lead.id);
+      setEstado('wrapup');
+      setErro('Há um resultado pendente. Salve novamente antes de continuar.');
+    }
+  }, []);
+
   useEffect(() => { setKabamOutbox(safeStorageRead(OUTBOX_KEY, [])); }, []);
   useEffect(() => { safeStorageWrite(OUTBOX_KEY, kabamOutbox); }, [kabamOutbox]);
 
 
   const carregarDados = async ({ silencioso = false } = {}) => {
-    if (refreshRef.current) return;
+    if (refreshRef.current || pendingRef.current || callRef.current || dialingRef.current) return;
     refreshRef.current = true;
+    const revision = dataRevisionRef.current;
     if (!silencioso) setAtualizando(true);
 
     try {
       const [filaResponse, ligacoesResponse] = await Promise.all([
-        fetch('/api/fila', { cache: 'no-store' }),
-        fetch('/api/ligacoes', { cache: 'no-store' }),
+        fetch('/api/fila', { cache: 'no-store', signal: AbortSignal.timeout(25000) }),
+        fetch('/api/ligacoes', { cache: 'no-store', signal: AbortSignal.timeout(25000) }),
       ]);
 
       if (filaResponse.status === 401 || ligacoesResponse.status === 401) {
@@ -187,7 +215,10 @@ export default function DiscadorEVS() {
         throw new Error(filaBody.error || 'Falha ao carregar a fila.');
       }
 
+      // A refresh started before dialing must not replace a live call or a saved result.
+      if (callRef.current || dialingRef.current || pendingRef.current || revision !== dataRevisionRef.current) return;
       const carregados = (filaBody.leads || []).map(normalizarLead);
+      leadsRef.current = carregados;
       setLeads(carregados);
       setActiveId((currentId) => (
         carregados.some((item) => String(item.id) === String(currentId))
@@ -203,9 +234,10 @@ export default function DiscadorEVS() {
       }
 
       setUltimaAtualizacao(new Date());
-      if (!silencioso) setErro('');
+      if (!silencioso && !pendingRef.current) setErro('');
     } catch (error) {
-      if (!silencioso) setErro(mensagemErro(error, 'Falha ao atualizar a fila.'));
+      pausarAutomatico();
+      setErro(mensagemErro(error, 'Falha ao atualizar a fila.'));
     } finally {
       refreshRef.current = false;
       setAtualizando(false);
@@ -222,14 +254,14 @@ export default function DiscadorEVS() {
         const token = await obterToken(); const { Device } = await import('@twilio/voice-sdk');
         if (!Device.isSupported) throw new Error('Este navegador não é compatível com o Twilio Voice.');
         device = new Device(token, { codecPreferences: ['opus', 'pcmu'], logLevel: 1, tokenRefreshMs: 60000 });
-        device.on('error', (error) => { setErro(mensagemErro(error, 'O Twilio não conseguiu iniciar a ligação.')); setEstado('idle'); setPronto(false); });
-        device.on('tokenWillExpire', async () => { try { device.updateToken(await obterToken()); setPronto(true); } catch (error) { setErro(mensagemErro(error, 'Não foi possível renovar o token do Twilio.')); setPronto(false); } });
+        device.on('error', (error) => { pausarAutomatico(); setErro(mensagemErro(error, 'O Twilio não conseguiu iniciar a ligação.')); setPronto(false); });
+        device.on('tokenWillExpire', async () => { try { device.updateToken(await obterToken()); setPronto(true); } catch (error) { pausarAutomatico(); setErro(mensagemErro(error, 'Não foi possível renovar o token do Twilio.')); setPronto(false); } });
         if (desmontado) { device.destroy(); return; }
         deviceRef.current = device; setPronto(true);
       } catch (error) { if (!desmontado) setErro(mensagemErro(error, 'Falha ao conectar no Twilio. Confira as credenciais.')); }
     })();
-    return () => { desmontado = true; clearInterval(timerRef.current); clearTimeout(nextTimerRef.current); device?.destroy(); };
-  }, []);
+    return () => { desmontado = true; clearInterval(timerRef.current); clearTimeout(nextTimerRef.current); clearTimeout(statusTimerRef.current); callGenerationRef.current += 1; deviceRef.current = null; device?.destroy(); };
+  }, [deviceRetry]);
 
   useEffect(() => { if (estado === 'active') timerRef.current = setInterval(() => setSeg((seconds) => seconds + 1), 1000); return () => clearInterval(timerRef.current); }, [estado]);
 
@@ -245,30 +277,38 @@ export default function DiscadorEVS() {
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('discador:comentario-kabam', { detail: payload }));
   };
 
-  const registrarNaoAtendimentoAutomatico = (target) => {
-    if (!target || manualHangupRef.current || callAcceptedRef.current || automaticRecordingRef.current) {
-      setEstado('wrapup');
-      return;
-    }
+  const registrarNaoAtendimentoAutomatico = (target, confirmado = false) => {
+    if (!target || automaticRecordingRef.current || saveRef.current || pendingRef.current) return;
+    if (manualHangupRef.current || (callAcceptedRef.current && !confirmado)) { setEstado('wrapup'); return; }
 
     automaticRecordingRef.current = true;
     setEstado('wrapup');
 
-    registrar('nao_atendeu', target, {
+    registrarRef.current('nao_atendeu', target, {
       automatico: true,
       duracao_seg: 0,
-      nota: '',
     }).finally(() => {
       automaticRecordingRef.current = false;
     });
   };
 
   const chamarLead = async (target) => {
-    if (!target || !leadElegivel(target) || !deviceRef.current) return;
+    if (dialingRef.current || callRef.current || saveRef.current || pendingRef.current || estado !== 'idle') return;
+    target = leadsRef.current.find((item) => String(item.id) === String(target?.id));
+    if (!target || !leadElegivel(target) || !deviceRef.current || !pronto) {
+      pausarAutomatico();
+      setErro('Não foi possível iniciar: confira a fila e reconecte o telefone.');
+      return;
+    }
+    const automatico = autoAtivoRef.current && !autoPausadoRef.current;
+    dialingRef.current = true;
+    const generation = ++callGenerationRef.current;
+    dataRevisionRef.current += 1;
 
     clearTimeout(nextTimerRef.current);
     setActiveId(target.id);
     setSeg(0);
+    sidRef.current = null;
     setEstado('dialing');
     setErro('');
     callAcceptedRef.current = false;
@@ -276,11 +316,13 @@ export default function DiscadorEVS() {
     manualHangupRef.current = false;
 
     try {
+      deviceRef.current.updateToken(await obterToken());
       if (navigator.mediaDevices?.getUserMedia) {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         stream.getTracks().forEach((track) => track.stop());
       }
 
+      if (manualHangupRef.current || (automatico && autoPausadoRef.current)) { setEstado('idle'); return; }
       const call = await deviceRef.current.connect({
         params: {
           To: target.telefone,
@@ -291,64 +333,92 @@ export default function DiscadorEVS() {
       });
 
       callRef.current = call;
-
-      call.on('ringing', () => setEstado('dialing'));
-
+      let terminou = false;
+      const vigente = () => generation === callGenerationRef.current;
+      const finalizar = async (error = null, confirmed = null) => {
+        if (terminou || !vigente()) return;
+        terminou = true;
+        clearTimeout(statusTimerRef.current);
+        clearInterval(timerRef.current);
+        sidRef.current = call.parameters?.CallSid || sidRef.current;
+        const manual = manualHangupRef.current;
+        setEstado('checking');
+        try {
+          const outcome = manual ? null : (confirmed || await readCallOutcome(sidRef.current));
+          if (!vigente()) return;
+          // Release the browser connection only after a terminal event/status.
+          // Late SDK events are ignored by the guard above.
+          call.disconnect();
+          callRef.current = null;
+          if (outcome?.noAnswer) {
+            registrarNaoAtendimentoAutomatico(target, true);
+          } else if (manual || outcome?.status === 'completed') {
+            setEstado('wrapup');
+          } else {
+            pausarAutomatico();
+            setErro(error ? mensagemErro(error, 'Falha técnica na ligação.') : `Chamada sem atendimento confirmado (${outcome?.status || 'desconhecido'}). Nenhuma tentativa foi descontada.`);
+            setEstado('wrapup');
+          }
+        } catch (statusError) {
+          if (!vigente()) return;
+          call.disconnect();
+          callRef.current = null;
+          pausarAutomatico();
+          setErro(mensagemErro(statusError, 'Não foi possível confirmar o resultado. Confira o atendimento antes de salvar.'));
+          setEstado('wrapup');
+        }
+      };
+      const monitorar = async () => {
+        if (terminou || !vigente()) return;
+        const sid = call.parameters?.CallSid;
+        if (sid) {
+          sidRef.current = sid;
+          try {
+            const outcome = await readCallOutcome(sid, { attempts: 1 });
+            if (terminou || !vigente()) return;
+            if (outcome.terminal) { await finalizar(null, outcome); return; }
+          } catch (error) {
+            if (terminou || !vigente()) return;
+            // Do not hang up a conversation because a status read failed.
+            setErro('Verificação da chamada indisponível. Você pode encerrar pelo botão Encerrar.');
+          }
+        }
+        if (call.status?.() === 'closed') { await finalizar(); return; }
+        statusTimerRef.current = setTimeout(monitorar, 15000);
+      };
+      call.on('ringing', () => {
+        if (terminou || !vigente()) return;
+        sidRef.current = call.parameters?.CallSid || sidRef.current;
+        setEstado('dialing');
+      });
       call.on('accept', (acceptedCall) => {
+        if (terminou || !vigente()) return;
         callAcceptedRef.current = true;
-        sidRef.current = acceptedCall.parameters?.CallSid || null;
+        sidRef.current = acceptedCall.parameters?.CallSid || call.parameters?.CallSid || null;
         setEstado('active');
       });
-
-      call.on('disconnect', () => {
-        clearInterval(timerRef.current);
-        callRef.current = null;
-
-        if (!manualHangupRef.current && !callAcceptedRef.current) {
-          registrarNaoAtendimentoAutomatico(target);
-          return;
-        }
-
-        setEstado('wrapup');
-      });
-
-      call.on('cancel', () => {
-        callRef.current = null;
-        if (!manualHangupRef.current && !callAcceptedRef.current) {
-          registrarNaoAtendimentoAutomatico(target);
-        } else {
-          setEstado('wrapup');
-        }
-      });
-
-      call.on('reject', () => {
-        callRef.current = null;
-        if (!manualHangupRef.current && !callAcceptedRef.current) {
-          registrarNaoAtendimentoAutomatico(target);
-        } else {
-          setEstado('wrapup');
-        }
-      });
-
-      call.on('error', (error) => {
-        setErro('Erro na ligação: ' + mensagemErro(error, 'erro desconhecido'));
-        callRef.current = null;
-
-        if (!manualHangupRef.current && !callAcceptedRef.current && autoAtivoRef.current && !autoPausadoRef.current) {
-          registrarNaoAtendimentoAutomatico(target);
-          return;
-        }
-
-        setEstado('wrapup');
-      });
+      call.on('disconnect', () => finalizar());
+      call.on('cancel', () => finalizar());
+      call.on('reject', () => finalizar());
+      call.on('error', (error) => finalizar(error));
+      statusTimerRef.current = setTimeout(monitorar, 35000);
+      if (manualHangupRef.current) { call.disconnect(); await finalizar(); }
     } catch (error) {
       manualHangupRef.current = true;
+      pausarAutomatico();
       setErro('Não foi possível ligar: ' + mensagemErro(error, 'erro desconhecido'));
       setEstado('idle');
+    } finally {
+      dialingRef.current = false;
     }
   };
+  chamarRef.current = chamarLead;
 
   const iniciarAutomatico = () => {
+    if (!pronto || pendingRef.current || saveRef.current || estado !== 'idle') {
+      setErro('Reconecte o telefone ou salve o resultado pendente antes de iniciar.');
+      return;
+    }
     const candidato = leadElegivel(lead) ? lead : filaElegivel[0];
     if (!candidato) return;
 
@@ -371,7 +441,7 @@ export default function DiscadorEVS() {
   const encerrar = () => {
     manualHangupRef.current = true;
     if (callRef.current) callRef.current.disconnect();
-    else setEstado('wrapup');
+    else { pausarAutomatico(); setEstado('idle'); }
   };
 
   const sair = async () => {
@@ -384,40 +454,52 @@ export default function DiscadorEVS() {
 
   async function registrar(resultado, leadOverride = null, options = {}) {
     const leadAtual = leadOverride || lead;
-    if (!leadAtual) return;
+    if (!leadAtual || saveRef.current || !resultadoDe(resultado)) return;
+    saveRef.current = true;
+    setSalvando(true);
+    dataRevisionRef.current += 1;
 
     const configuracao = resultadoDe(resultado);
-    const tentativa = Number(leadAtual.tentativas || 0) + (['nao_atendeu', 'caixa'].includes(resultado) ? 1 : 0);
+    const tentativa = pendingRef.current?.payload.tentativa ?? Number(leadAtual.tentativas || 0) + (['nao_atendeu', 'caixa'].includes(resultado) ? 1 : 0);
     const atingiuLimite = ['nao_atendeu', 'caixa'].includes(resultado) && tentativa >= MAX_TENTATIVAS;
-    const dataAgendamento = resultado === 'reuniao' ? dataProxima : '';
-    const dataRetorno = ['interessado', 'retornar'].includes(resultado) ? dataProxima : '';
+    const dataAgendamento = pendingRef.current?.payload.data_agendamento ?? (resultado === 'reuniao' ? `${dataProxima}T${horaProxima || '00:00'}:00` : '');
+    const dataRetorno = pendingRef.current?.payload.data_retorno ?? (['interessado', 'retornar'].includes(resultado) ? dataProxima : '');
     const proximaAcao = atingiuLimite ? 'Limite de tentativas — revisar' : proximaAcaoDe(resultado);
-    const duracaoAtual = options.duracao_seg ?? seg;
-    const notaAtual = options.nota ?? nota;
+    const duracaoAtual = pendingRef.current?.payload.duracao_seg ?? options.duracao_seg ?? seg;
+    const notaAtual = pendingRef.current?.payload.nota ?? options.nota ?? nota;
     const notaLimpa = String(notaAtual || '').trim();
 
+    const saved = pendingRef.current || {
+      lead: leadAtual,
+      payload: {
+        event_id: `EVS-${crypto.randomUUID()}`,
+        lead_id: leadAtual.id,
+        id_lead: leadAtual.idLead || leadAtual.id,
+        sheet_row: leadAtual.sheetRow,
+        nome: leadAtual.nome,
+        telefone: leadAtual.telefone,
+        resultado,
+        duracao_seg: duracaoAtual,
+        nota: notaLimpa,
+        twilio_sid: sidRef.current,
+        proxima_acao: proximaAcao,
+        data_retorno: dataRetorno,
+        data_agendamento: dataAgendamento,
+        tentativa,
+      },
+    };
+    pendingRef.current = saved;
+    setPendente(saved);
     try {
+      window.localStorage.setItem(PENDING_KEY, JSON.stringify(saved));
       const response = await fetch('/api/ligacoes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          lead_id: leadAtual.id,
-          id_lead: leadAtual.idLead || leadAtual.id,
-          sheet_row: leadAtual.sheetRow,
-          nome: leadAtual.nome,
-          telefone: leadAtual.telefone,
-          resultado,
-          duracao_seg: duracaoAtual,
-          nota: notaLimpa,
-          twilio_sid: sidRef.current,
-          proxima_acao: proximaAcao,
-          data_retorno: dataRetorno,
-          data_agendamento: dataAgendamento,
-          tentativa,
-        }),
+        signal: AbortSignal.timeout(25000),
+        body: JSON.stringify(saved.payload),
       });
-
       if (response.status === 401) {
+        pausarAutomatico();
         window.location.assign('/login');
         return;
       }
@@ -464,50 +546,22 @@ export default function DiscadorEVS() {
         emitirComentarioKabam(payload);
       }
     } catch (error) {
-      setErro(mensagemErro(error, 'Não foi possível salvar o resultado da ligação.'));
-
-      // Nunca deixa o painel preso em "Ligação encerrada" se o salvamento falhar.
-      setNota('');
-      setSeg(0);
-      sidRef.current = null;
-      setResultadoPendente(null);
-      setDataProxima('');
-      setHoraProxima('');
-      setErroResultado('');
-      setEstado('idle');
-      callRef.current = null;
-      manualHangupRef.current = false;
-      automaticRecordingRef.current = false;
-
-      // No modo automático, pula o lead que acabou de falhar e segue para o próximo
-      // em vez de exigir F5 ou novo login manual.
-      if (autoAtivoRef.current && !autoPausadoRef.current) {
-        const candidatosFalha = leads.filter(
-          (item) => leadElegivel(item) && String(item.id) !== String(leadAtual.id)
-        );
-        const proximoFalha = candidatosFalha[0] || null;
-
-        clearTimeout(nextTimerRef.current);
-
-        if (proximoFalha) {
-          setActiveId(proximoFalha.id);
-          nextTimerRef.current = setTimeout(
-            () => chamarLead(proximoFalha),
-            AUTO_NEXT_DELAY_MS
-          );
-        } else {
-          nextTimerRef.current = setTimeout(
-            () => carregarDados({ silencioso: true }),
-            1500
-          );
-        }
-      }
-
+      pausarAutomatico();
+      setActiveId(leadAtual.id);
+      setEstado('wrapup');
+      setErro(mensagemErro(error, 'Não foi possível salvar o resultado.'));
       return;
+    } finally {
+      saveRef.current = false;
+      setSalvando(false);
     }
 
+    pendingRef.current = null;
+    setPendente(null);
+    safeStorageWrite(PENDING_KEY, null);
+    setErro('');
     const novoStatus = atingiuLimite ? 'limite_tentativas' : configuracao.status;
-    const leadsAtualizados = leads.map((item) => (
+    const leadsAtualizados = leadsRef.current.map((item) => (
       item.id === leadAtual.id
         ? {
             ...item,
@@ -524,6 +578,10 @@ export default function DiscadorEVS() {
         : item
     ));
 
+    // Move the attempted lead to the end, so A -> B -> C instead of A -> B -> A.
+    const attemptedIndex = leadsAtualizados.findIndex((item) => String(item.id) === String(leadAtual.id));
+    if (attemptedIndex >= 0) leadsAtualizados.push(...leadsAtualizados.splice(attemptedIndex, 1));
+    leadsRef.current = leadsAtualizados;
     setLeads(leadsAtualizados);
 
     const candidatos = leadsAtualizados.filter(
@@ -550,7 +608,7 @@ export default function DiscadorEVS() {
         clearTimeout(nextTimerRef.current);
         autoPausadoRef.current = false;
         setAutoPausado(false);
-        nextTimerRef.current = setTimeout(() => chamarLead(proximo), AUTO_NEXT_DELAY_MS);
+        nextTimerRef.current = setTimeout(() => { if (autoAtivoRef.current && !autoPausadoRef.current) chamarRef.current(proximo); }, AUTO_NEXT_DELAY_MS);
       } else if (autoAtivoRef.current) {
         autoPausadoRef.current = true;
         setAutoPausado(true);
@@ -569,24 +627,34 @@ export default function DiscadorEVS() {
     manualHangupRef.current = false;
   }
 
+  registrarRef.current = registrar;
+  const repetirSalvamento = () => {
+    const saved = pendingRef.current;
+    if (!saved) return;
+    return registrar(saved.payload.resultado, saved.lead, {
+      duracao_seg: saved.payload.duracao_seg, nota: saved.payload.nota,
+    });
+  };
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><div className="brand-mark">SZ</div><div><div className="brand-name">Discador EVS</div><div className="brand-sub">Equipe que Vende Sozinha</div></div></div>
-        <div className="auto-box"><div className="auto-title">Discador <span className={autoAtivo && !autoPausado ? 'state-dot active' : 'state-dot'}>●</span></div><div className="auto-state">{autoAtivo ? (autoPausado ? 'pausado' : 'automático ativo') : 'modo manual'}</div><button className="btn-mode" onClick={alternarAutomatico} disabled={!filaElegivel.length && !autoAtivo}>{autoAtivo && !autoPausado ? 'Pausar' : autoAtivo ? 'Retomar' : 'Iniciar automático'}</button></div>
+        <div className="auto-box"><div className="auto-title">Discador <span className={autoAtivo && !autoPausado ? 'state-dot active' : 'state-dot'}>●</span></div><div className="auto-state">{autoAtivo ? (autoPausado ? 'pausado' : 'automático ativo') : 'modo manual'}</div><button className="btn-mode" onClick={alternarAutomatico} disabled={(!filaElegivel.length && !autoAtivo) || (!autoAtivo || autoPausado) && (!pronto || estado !== 'idle' || Boolean(pendente) || salvando)}>{autoAtivo && !autoPausado ? 'Pausar' : autoAtivo ? 'Retomar' : 'Iniciar automático'}</button></div>
         <div className="kpis"><Kpi label="Ligações" value={stats.feitas} /><Kpi label="Atendidas" value={stats.atendidas} /><Kpi label="Atendimento" value={`${stats.atendimento}%`} highlight /><Kpi label="Tempo falado" value={fmtTotal(stats.tempo)} /><Kpi label="Agendamentos" value={stats.agendamentos} tone="green" /><Kpi label="Conversão" value={`${stats.conversao}%`} tone="green" highlight /><Kpi label="Na fila" value={stats.fila} /><Kpi label="Retornos" value={stats.retornos} tone="gold" /></div>
         <div className="refresh-box"><button className="btn-refresh" onClick={() => carregarDados()} disabled={atualizando}><RefreshIcon />{atualizando ? 'Atualizando…' : 'Atualizar fila'}</button><div className="refresh-status">{ultimaAtualizacao ? `Atualizada às ${fmtHora(ultimaAtualizacao)}` : 'Aguardando dados'}</div></div>
         <div className="operator"><div className="operator-avatar">SS</div><div><div className="operator-name">Suzana Santos</div><div className="operator-status">{fonteDados === 'Base_Geral' ? 'Base_Geral · conectada' : fonteDados === 'Supabase' ? 'fallback · Supabase' : pronto ? 'preparando ligação' : 'conectando dados'}</div></div><button className="logout-btn" onClick={sair}>Sair</button></div>
       </header>
 
       {erro && <div className="alert-error">{erro}</div>}
+      {!pronto && estado === 'idle' && <button className="btn-secondary" onClick={() => { setPronto(false); setDeviceRetry((n) => n + 1); }}>Reconectar telefone</button>}
+      {pendente && <div className="alert-error">Resultado pendente de salvamento. <button className="btn-secondary" disabled={salvando} onClick={repetirSalvamento}>{salvando ? 'Salvando…' : 'Salvar novamente'}</button></div>}
       <div className="workspace">
         <aside className="queue-panel"><div className="queue-head"><span>Fila de hoje</span><strong>{filaVisivel.length}</strong></div><div className="queue-filters"><input value={busca} onChange={(event) => setBusca(event.target.value)} placeholder="Buscar nome, telefone ou negócio" aria-label="Buscar lead" /><select value={filtroFila} onChange={(event) => setFiltroFila(event.target.value)} aria-label="Filtrar fila"><option value="todos">Todos elegíveis</option><option value="retornos">Retornos primeiro</option><option value="novos">Novos leads</option></select></div><div className="queue-list scroll-area">{filaVisivel.map((item) => { const ativo = String(item.id) === String(lead?.id); return <button key={item.id} className={`queue-item ${ativo ? 'selected' : ''}`} onClick={() => estado === 'idle' && setActiveId(item.id)} disabled={estado !== 'idle'}><div className="queue-avatar">{iniciais(item.nome)}</div><div className="queue-copy"><div className="queue-name">{item.nome}</div><div className="queue-business">{item.negocio || 'Negócio não informado'}</div></div>{item.status === 'retornar' && <span className="return-badge">{item.dataRetorno ? fmtDataCurta(item.dataRetorno) : 'retornar'}</span>}</button>; })}{!filaVisivel.length && <div className="empty-state">Nenhum lead elegível nessa visão.</div>}</div></aside>
 
         <main className="cockpit scroll-area">{!lead ? <div className="empty-card">Nenhum lead disponível. Verifique a fila do banco de dados.</div> : <><section className="lead-card"><div className="lead-header"><div className="lead-avatar">{iniciais(lead.nome)}</div><div className="lead-main"><div className="lead-name">{lead.nome}</div><div className="lead-business">{lead.negocio || 'Negócio não informado'}</div><div className="lead-tags">{lead.origem && <span className="chip origin">{lead.origem}</span>}{lead.instagram && <span className="chip instagram">{lead.instagram}</span>}{lead.tags.map((tag) => <span className="chip tag" key={tag}>{tag}</span>)}</div></div><div className="lead-phone-block"><div className="field-caption">Discando para</div><div className="lead-phone">{fmtTel(lead.telefone)}</div><div className="operator-caption">operadora · Suzana Santos</div></div></div>{bloqueado && <div className="blocked-warning">Este lead está bloqueado para ligação{lead.motivoBloqueio ? `: ${lead.motivoBloqueio}` : '.'}</div>}<div className="qualification-grid"><Qualification label="Negócio" value={lead.negocio} /><Qualification label="Faturamento" value={lead.faturamento} highlight /><Qualification label="Cargo" value={lead.cargo} /><Qualification label="Nº vendedores" value={lead.numeroVendedores} /><Qualification label="Sai 10 dias?" value={lead.dezDias} tone={lead.dezDias === 'Sim' ? 'green' : lead.dezDias === 'Não' ? 'red' : ''} /></div>{lead.desafio && <div className="challenge"><span>Principal desafio</span>{lead.desafio}</div>}{lead.observacao && <div className="last-note"><span>Última anotação</span>{lead.observacao}</div>}</section>
 
-<section className="call-card"><CallState estado={estado} seconds={seg} />{estado === 'idle' && <><button className="btn-primary btn-call" onClick={() => chamarLead(lead)} disabled={!pronto || bloqueado}><PhoneIcon /> {pronto ? (autoAtivo && !autoPausado ? 'Aguardando próxima...' : 'Ligar manualmente') : 'Conectando…'}</button>{autoAtivo && !autoPausado && <div className="auto-hint">Avança após não atender ou caixa postal, com até {MAX_TENTATIVAS} tentativas por lead.</div>}</>}{(estado === 'dialing' || estado === 'active') && <div className="call-controls">{estado === 'active' && <div className="call-live-note">Microfone ativo no navegador</div>}<button className="btn-primary btn-hangup" onClick={encerrar}><HangupIcon /> Encerrar</button></div>}{estado === 'wrapup' && <div className="disposition"><div className="disposition-title">Como foi a ligação?</div><div className="disposition-grid">{RESULTADOS.map((resultado) => <button key={resultado.key} className="disposition-button" style={{ borderColor: resultado.cor, color: resultado.cor }} onClick={() => selecionarResultado(resultado.key)}>{resultado.label}</button>)}</div>{resultadoPendente && <div className="next-step-box"><div className="next-step-title">Próximo passo: {resultadoDe(resultadoPendente)?.label}</div>{['reuniao', 'interessado', 'retornar'].includes(resultadoPendente) && <div className="next-step-fields"><label>{resultadoPendente === 'reuniao' ? 'Data da reunião' : 'Data do retorno'}<input type="date" value={dataProxima} onChange={(event) => setDataProxima(event.target.value)} /></label>{resultadoPendente === 'reuniao' && <label>Horário<input type="time" value={horaProxima} onChange={(event) => setHoraProxima(event.target.value)} /></label>}</div>}{erroResultado && <div className="field-error">{erroResultado}</div>}<div className="next-step-actions"><button className="btn-primary" onClick={confirmarResultado}>Salvar resultado</button><button className="btn-secondary" onClick={() => setResultadoPendente(null)}>Voltar</button></div></div>}</div>}<label className={`note-label ${estado === 'active' ? 'note-live' : ''}`}><span>{estado === 'active' ? 'Anotação durante o atendimento' : estado === 'wrapup' ? 'O que aconteceu neste atendimento?' : 'Anotação deste atendimento'}</span><textarea value={nota} onChange={(event) => setNota(event.target.value)} placeholder="Escreva o que aconteceu, se não atendeu, objeções, próximos passos…" /><small>Essa anotação será salva neste registro e ficará no histórico do lead.</small></label></section></>}</main>
+<section className="call-card"><CallState estado={estado} seconds={seg} />{estado === 'idle' && <><button className="btn-primary btn-call" onClick={() => chamarLead(lead)} disabled={!pronto || !leadElegivel(lead) || Boolean(pendente) || salvando}><PhoneIcon /> {pronto ? (autoAtivo && !autoPausado ? 'Aguardando próxima...' : 'Ligar manualmente') : 'Conectando…'}</button>{autoAtivo && !autoPausado && <div className="auto-hint">Avança após não atender ou caixa postal, com até {MAX_TENTATIVAS} tentativas por lead.</div>}</>}{(estado === 'dialing' || estado === 'active') && <div className="call-controls">{estado === 'active' && <div className="call-live-note">Microfone ativo no navegador</div>}<button className="btn-primary btn-hangup" onClick={encerrar}><HangupIcon /> Encerrar</button></div>}{estado === 'wrapup' && <div className="disposition"><div className="disposition-title">Como foi a ligação?</div><div className="disposition-grid">{RESULTADOS.map((resultado) => <button key={resultado.key} className="disposition-button" style={{ borderColor: resultado.cor, color: resultado.cor }} disabled={salvando || Boolean(pendente)} onClick={() => selecionarResultado(resultado.key)}>{resultado.label}</button>)}</div>{resultadoPendente && <div className="next-step-box"><div className="next-step-title">Próximo passo: {resultadoDe(resultadoPendente)?.label}</div>{['reuniao', 'interessado', 'retornar'].includes(resultadoPendente) && <div className="next-step-fields"><label>{resultadoPendente === 'reuniao' ? 'Data da reunião' : 'Data do retorno'}<input type="date" value={dataProxima} onChange={(event) => setDataProxima(event.target.value)} /></label>{resultadoPendente === 'reuniao' && <label>Horário<input type="time" value={horaProxima} onChange={(event) => setHoraProxima(event.target.value)} /></label>}</div>}{erroResultado && <div className="field-error">{erroResultado}</div>}<div className="next-step-actions"><button className="btn-primary" disabled={salvando || Boolean(pendente)} onClick={confirmarResultado}>Salvar resultado</button><button className="btn-secondary" disabled={salvando || Boolean(pendente)} onClick={() => setResultadoPendente(null)}>Voltar</button></div></div>}</div>}<label className={`note-label ${estado === 'active' ? 'note-live' : ''}`}><span>{estado === 'active' ? 'Anotação durante o atendimento' : estado === 'wrapup' ? 'O que aconteceu neste atendimento?' : 'Anotação deste atendimento'}</span><textarea value={nota} onChange={(event) => setNota(event.target.value)} placeholder="Escreva o que aconteceu, se não atendeu, objeções, próximos passos…" /><small>Essa anotação será salva neste registro e ficará no histórico do lead.</small></label></section></>}</main>
 
         <section className="details-panel"><div className="tabs"><button className={aba === 'ficha' ? 'active' : ''} onClick={() => setAba('ficha')}>Ficha do lead</button><button className={aba === 'historico' ? 'active' : ''} onClick={() => setAba('historico')}>Histórico {histLead.length > 0 && <span>{histLead.length}</span>}</button></div><div className="details-content scroll-area">{!lead && <div className="empty-state">Selecione um lead para ver os detalhes.</div>}{lead && aba === 'ficha' && <div className="lead-form"><ReadOnlyField label="Nome" value={lead.nome} /><ReadOnlyField label="Negócio" value={lead.negocio} /><ReadOnlyField label="Telefone (E.164)" value={lead.telefone} hint="Formato +55 + DDD + número" /><div className="two-columns"><ReadOnlyField label="E-mail" value={lead.email} /><ReadOnlyField label="Instagram" value={lead.instagram} /></div><div className="section-title">Qualificação</div><div className="two-columns"><ReadOnlyField label="Faturamento" value={lead.faturamento} /><ReadOnlyField label="Cargo" value={lead.cargo} /></div><ReadOnlyField label="Número de vendedores" value={lead.numeroVendedores} hint="Campo M da Base_Geral" /><ReadOnlyField label="Consegue ficar 10 dias fora do negócio?" value={lead.dezDias} /><ReadOnlyField label="Principal desafio" value={lead.desafio} multiline /><div className="section-title">Gestão</div><div className="two-columns"><ReadOnlyField label="Origem / etiqueta" value={lead.origem} /><ReadOnlyField label="Status na fila" value={statusLabel[lead.status] || lead.status} /></div><ReadOnlyField label="Resultado" value={lead.resultado} /><ReadOnlyField label="Motivo de bloqueio" value={lead.motivoBloqueio} /><div className="read-only-note">A ficha é alimentada pela Base_Geral. As alterações operacionais da ligação são registradas no histórico.</div></div>}{lead && aba === 'historico' && <div><div className="kabam-box"><strong>Kabam / BotConversa</strong><div>{kabamOutbox.length ? `${kabamOutbox.length} comentário(s) escrito(s) aguardando sincronização.` : 'Comentários escritos ficarão prontos para sincronização.'}</div><small>Preparado · o envio será ligado quando o endpoint do Kabam for definido.</small></div><div className="history-tabs"><button className={escopoHistorico === 'lead' ? 'active' : ''} onClick={() => setEscopoHistorico('lead')}>Deste lead</button><button className={escopoHistorico === 'todas' ? 'active' : ''} onClick={() => setEscopoHistorico('todas')}>Todas carregadas</button></div>{!histExibido.length && <div className="empty-state">Nenhuma ligação registrada ainda.</div>}{histExibido.map((item) => { const resultado = resultadoDe(item.resultado); return <div className="history-item" key={item.id}><div className="history-bar" style={{ background: resultado?.cor || C.suave }} /><div><div className="history-title">{escopoHistorico === 'todas' && <strong>{leads.find((current) => String(current.id) === String(item.lead_id))?.nome || 'Lead'}</strong>}<span style={{ color: resultado?.cor || C.suave }}>{resultado?.label || item.resultado}</span></div><div className="history-meta">{fmtDataHora(item.created_at)} · {item.tentativa ? `Tentativa ${item.tentativa}` : 'Atendimento registrado'} · {item.duracao_seg > 0 ? fmtCron(item.duracao_seg) : 'sem fala'}</div>{item.nota && <div className="history-note">{item.nota}</div>}{item.nota && <div className="kabam-pending">Comentário pronto para o Kabam</div>}</div></div>; })}</div>}</div></section>
       </div>
@@ -597,7 +665,7 @@ export default function DiscadorEVS() {
 function Kpi({ label, value, tone, highlight }) { return <div className="kpi"><div className={`kpi-value ${tone || ''} ${highlight ? 'highlight' : ''}`}>{value}</div><div className="kpi-label">{label}</div></div>; }
 function Qualification({ label, value, tone, highlight }) { return <div className="qualification"><div className="qualification-label">{label}</div><div className={`qualification-value ${tone || ''} ${highlight ? 'highlight' : ''}`}>{value || '—'}</div></div>; }
 function ReadOnlyField({ label, value, hint, multiline }) { return <label className="read-field"><span>{label}</span>{multiline ? <textarea value={value || ''} readOnly /> : <input value={value || ''} readOnly />}{hint && <small>{hint}</small>}</label>; }
-function CallState({ estado, seconds }) { if (estado === 'idle') return <div className="call-idle">Pronto para ligar</div>; const map = { dialing: ['Discando…', 'gold'], active: ['Em ligação', 'green'], wrapup: ['Ligação encerrada', 'muted'] }[estado] || ['Pronto', 'muted']; return <div className="call-state"><div className={`state-indicator ${map[1]}`} /><div className={`call-state-label ${map[1]}`}>{map[0]}</div>{(estado === 'active' || estado === 'wrapup') && <div className="call-timer">{fmtCron(seconds)}</div>}</div>; }
+function CallState({ estado, seconds }) { if (estado === 'idle') return <div className="call-idle">Pronto para ligar</div>; const map = { dialing: ['Discando…', 'gold'], checking: ['Conferindo resultado…', 'gold'], active: ['Em ligação', 'green'], wrapup: ['Ligação encerrada', 'muted'] }[estado] || ['Pronto', 'muted']; return <div className="call-state"><div className={`state-indicator ${map[1]}`} /><div className={`call-state-label ${map[1]}`}>{map[0]}</div>{(estado === 'active' || estado === 'wrapup') && <div className="call-timer">{fmtCron(seconds)}</div>}</div>; }
 function RefreshIcon() { return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 5v4h4" /><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 19v-4h-4" /></svg>; }
 function PhoneIcon() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z" /></svg>; }
 function HangupIcon() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" /><line x1="23" y1="1" x2="1" y2="23" /></svg>; }
