@@ -21,9 +21,12 @@ export async function GET() {
           { headers: { 'Cache-Control': 'no-store', 'X-Discador-Source': 'Base_Geral' } }
         );
       } catch (sheetsError) {
-        // A leitura da fila pode continuar pelo espelho no Supabase. O modo
-        // estrito permanece valendo para escritas em /api/ligacoes, evitando
-        // registrar um resultado somente em uma das bases.
+        // No modo estrito, leitura e escrita precisam usar a mesma base.
+        // O espelho só é permitido quando a contingência foi habilitada.
+        if (baseGeralMustBeAvailable()) {
+          return Response.json({ error: sheetsError.message || 'Base_Geral indisponível.' },
+            { status: 503, headers: { 'Cache-Control': 'no-store' } });
+        }
         baseGeralFallback = true;
         console.warn('Base_Geral indisponível; lendo fila do fallback Supabase:', sheetsError);
       }

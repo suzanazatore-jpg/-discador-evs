@@ -236,42 +236,48 @@ function discListarHistorico_(limit) {
 }
 
 function discRegistrarLigacao_(body) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try { return discRegistrarLigacaoUnlocked_(body); }
+  finally { lock.releaseLock(); }
+}
+
+function discRegistrarLigacaoUnlocked_(body) {
   var sheet = discBaseSheet_();
   var sheetRow = discResolveRow_(sheet, body);
   var row = sheet.getRange(sheetRow, 1, 1, DISC_COL.observacao).getDisplayValues()[0];
   var resultado = String(body.resultado || '').trim();
   if (!resultado) throw new Error('Resultado da ligação é obrigatório.');
 
-  var tentativa = Number(body.tentativa) || 0;
+  var history = discHistorySheet_();
+  var historyId = body.event_id ? String(body.event_id) : 'LIG-' + Utilities.getUuid();
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(historyId)) throw new Error('event_id inválido.');
+  var existing = history.getRange(1, 1, Math.max(1, history.getLastRow()), 1)
+    .createTextFinder(historyId).matchEntireCell(true).findNext();
+  var prior = existing ? history.getRange(existing.getRow(), 1, 1, DISC_HISTORY_HEADERS.length).getValues()[0] : null;
+  if (prior && (String(prior[3]) !== String(row[0] || body.id_lead || body.lead_id) || String(prior[6]) !== resultado)) {
+    throw new Error('event_id já utilizado para outro lead ou resultado.');
+  }
+  if (prior && (Number(prior[7]) !== (Number(body.duracao_seg) || 0) ||
+      String(prior[8] || '') !== String(body.nota || '').trim() ||
+      String(prior[9] || '') !== String(body.proxima_acao || '') ||
+      String(prior[10] || '') !== String(body.data_retorno || '') ||
+      String(prior[11] || '') !== String(body.data_agendamento || '') ||
+      Number(prior[12]) !== (Number(body.tentativa) || 0) ||
+      String(prior[13] || '') !== String(body.twilio_sid || ''))) {
+    throw new Error('O conteúdo de um event_id não pode mudar no reenvio.');
+  }
+  var tentativa = prior ? Number(prior[12]) : Number(body.tentativa) || 0;
   var semAtendimento = resultado === 'nao_atendeu' || resultado === 'caixa';
   var limite = semAtendimento && tentativa >= 3;
   var status = discStatus_(resultado, limite);
   var tags = discMergeTags_(row[DISC_COL.tagsPabbly - 1], discTag_(resultado, limite));
   var motivo = limite ? 'Limite de tentativas sem atendimento' : String(body.motivo_bloqueio || row[DISC_COL.motivoBloqueio - 1] || '');
-  var agora = new Date();
+  var agora = prior ? new Date(prior[1]) : new Date();
 
-  sheet.getRange(sheetRow, DISC_COL.status).setValue(status);
-  sheet.getRange(sheetRow, DISC_COL.tagsPabbly).setValue(tags);
-  sheet.getRange(sheetRow, DISC_COL.motivoBloqueio).setValue(motivo);
-  sheet.getRange(sheetRow, DISC_COL.resultado).setValue(discResultadoLabel_(resultado));
-  sheet.getRange(sheetRow, DISC_COL.dataUltimoContato).setValue(agora);
-  sheet.getRange(sheetRow, DISC_COL.proximaAcao).setValue(String(body.proxima_acao || ''));
-
-  if (Object.prototype.hasOwnProperty.call(body, 'data_retorno')) {
-    discSetDate_(sheet.getRange(sheetRow, DISC_COL.dataRetorno), body.data_retorno);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'data_agendamento')) {
-    discSetDate_(sheet.getRange(sheetRow, DISC_COL.dataAgendamento), body.data_agendamento);
-  }
-  if (String(body.nota || '').trim()) {
-    sheet.getRange(sheetRow, DISC_COL.observacao).setValue(String(body.nota).trim());
-  }
-
-  var history = discHistorySheet_();
-  var historyId = 'LIG-' + Utilities.getUuid();
   var leadId = String(row[DISC_COL.idLead - 1] || body.id_lead || body.lead_id || ('sheet-row-' + sheetRow));
   var note = String(body.nota || '').trim();
-  history.appendRow([
+  if (!prior) history.appendRow([
     historyId,
     agora,
     sheetRow,
@@ -288,6 +294,35 @@ function discRegistrarLigacao_(body) {
     String(body.twilio_sid || ''),
     note ? 'pendente' : 'sem_comentario'
   ]);
+
+  // A delayed replay may acknowledge its own history but must not undo a
+  // newer result for the same lead. Repair partial base writes only if latest.
+  var newer = false;
+  if (prior && existing.getRow() < history.getLastRow()) {
+    var later = history.getRange(existing.getRow() + 1, 4, history.getLastRow() - existing.getRow(), 1).getValues();
+    newer = later.some(function(item) { return String(item[0]) === leadId; });
+  }
+  if (!newer) {
+    sheet.getRange(sheetRow, DISC_COL.status).setValue(status);
+    sheet.getRange(sheetRow, DISC_COL.tagsPabbly).setValue(tags);
+    sheet.getRange(sheetRow, DISC_COL.motivoBloqueio).setValue(motivo);
+    sheet.getRange(sheetRow, DISC_COL.resultado).setValue(discResultadoLabel_(resultado));
+    sheet.getRange(sheetRow, DISC_COL.dataUltimoContato).setValue(agora);
+    sheet.getRange(sheetRow, DISC_COL.proximaAcao).setValue(String(body.proxima_acao || ''));
+
+    if (Object.prototype.hasOwnProperty.call(body, 'data_retorno')) {
+      discSetDate_(sheet.getRange(sheetRow, DISC_COL.dataRetorno), body.data_retorno);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'data_agendamento')) {
+      discSetDate_(sheet.getRange(sheetRow, DISC_COL.dataAgendamento), body.data_agendamento);
+    }
+    if (String(body.nota || '').trim()) {
+      sheet.getRange(sheetRow, DISC_COL.observacao).setValue(String(body.nota).trim());
+    }
+
+  }
+
+  SpreadsheetApp.flush();
 
   var kabam = note ? {
     evento: 'discador.comentario',
