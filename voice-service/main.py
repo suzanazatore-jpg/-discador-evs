@@ -12,7 +12,8 @@ from typing import Any, Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field
 from tac import TAC, TACConfig
 from tac.channels.voice import VoiceChannel
@@ -109,7 +110,15 @@ lead_contexts: dict[str, CallContext] = {}
 calendar = CalendarService()
 
 
-def _authorized(authorization: str | None = Header(default=None)) -> None:
+voice_service_header = APIKeyHeader(
+    name="Authorization",
+    scheme_name="VoiceServiceToken",
+    description="Use Bearer seguido da chave VOICE_SERVICE_SECRET.",
+    auto_error=False,
+)
+
+
+def _authorized(authorization: str | None = Depends(voice_service_header)) -> None:
     expected = os.getenv("VOICE_SERVICE_SECRET", "")
     received = re.sub(r"^Bearer\s+", "", authorization or "", flags=re.IGNORECASE)
     if not expected or not secrets.compare_digest(expected, received):
