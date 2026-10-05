@@ -100,6 +100,11 @@ function doPost(e) {
       body = JSON.parse(e.postData.contents);
     }
 
+    if (body.action === 'discador_alterar_retorno') {
+      discAuthorize_(body.token);
+      return discJson_(discAlterarRetorno_(body));
+    }
+
     if (body.action === 'discador_bloquear_lead') {
       discAuthorize_(body.token);
       return discJson_(discBloquearLead_(body));
@@ -151,6 +156,46 @@ function discBloquearLead_(body) {
       id: storedId || 'sheet-row-' + sheetRow, sheet_row: sheetRow,
       status: 'Descartado', tags_pabbly: tags, pode_ligar: 'NÃO',
       motivo_bloqueio: 'Retirado da fila pela operadora'
+    }};
+  } finally { lock.releaseLock(); }
+}
+
+function discAlterarRetorno_(body) {
+  var text = String(body.data_retorno || '');
+  var match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) throw new Error('Escolha uma data válida para o retorno.');
+  var year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  var date = new Date(year, month - 1, day, 12, 0, 0);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+    throw new Error('Escolha uma data válida para o retorno.');
+  }
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var id = String(body.id_lead || body.lead_id || '').trim();
+    var phone = discDigits_(body.telefone);
+    if ((!id || id.indexOf('sheet-row-') === 0) && !phone) throw new Error('Informe o ID ou telefone do contato.');
+    var sheet = discBaseSheet_();
+    var sheetRow = discResolveRow_(sheet, {sheet_row: body.sheet_row, id_lead: id, telefone: phone});
+    var row = sheet.getRange(sheetRow, 1, 1, DISC_COL.observacao).getDisplayValues()[0];
+    var storedId = String(row[DISC_COL.idLead - 1] || '').trim();
+    var storedPhone = discDigits_(row[DISC_COL.whatsapp - 1]);
+    if ((id && id.indexOf('sheet-row-') !== 0 && storedId !== id) ||
+        (phone && storedPhone !== phone) || discEmptyRow_(row)) throw new Error('O contato mudou na planilha. Atualize a fila.');
+    var status = discNorm_(row[DISC_COL.status - 1]);
+    var tags = discNorm_(row[DISC_COL.tagsPabbly - 1] + ',' + row[DISC_COL.etiqueta - 1]).replace(/[\s-]+/g, '_');
+    if (['novo', 'retornar'].indexOf(status) === -1 ||
+        discNorm_(row[DISC_COL.podeLigar - 1]) !== 'sim' ||
+        /nao_ligar|nao_deseja_contato|agendou_mentoria_meet|diagnostico_agendado|mentoria_impulso|vendido/.test(tags) ||
+        row[DISC_COL.dataAgendamento - 1]) {
+      throw new Error('Este contato está bloqueado ou já tem reunião. O retorno não foi alterado.');
+    }
+    sheet.getRange(sheetRow, DISC_COL.proximaAcao).setValue('Retornar contato');
+    sheet.getRange(sheetRow, DISC_COL.status).setValue('Retornar');
+    sheet.getRange(sheetRow, DISC_COL.dataRetorno).setValue(date);
+    SpreadsheetApp.flush();
+    return {success: true, ok: true, source: 'Base_Geral', lead: {
+      id: storedId || 'sheet-row-' + sheetRow, sheet_row: sheetRow, status: 'Retornar', data_retorno: text
     }};
   } finally { lock.releaseLock(); }
 }

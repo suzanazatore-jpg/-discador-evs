@@ -33,7 +33,20 @@ const fmtCron = (seconds = 0) => `${Math.floor(seconds / 60)}:${String(seconds %
 const fmtTotal = (seconds = 0) => { const minutes = Math.floor(seconds / 60); const rest = seconds % 60; return minutes < 60 ? `${minutes}m ${String(rest).padStart(2, '0')}s` : `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`; };
 const fmtHora = (value) => value ? new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--';
 const fmtDataHora = (value) => value ? new Date(value).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '--/-- --:--';
-const fmtDataCurta = (value) => value ? new Date(`${String(value).slice(0, 10)}T12:00:00`).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '';
+function dataRetornoISO(value) {
+  const text = String(value || '').trim();
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|[T ])/);
+  const br = text.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:$|[ T])/);
+  if (!iso && !br) return '';
+  const year = Number(iso ? iso[1] : br[3]);
+  const month = Number(iso ? iso[2] : br[2]);
+  const day = Number(iso ? iso[3] : br[1]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return '';
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+const fmtDataCurta = (value) => { const date = dataRetornoISO(value); return date ? `${date.slice(8, 10)}/${date.slice(5, 7)}` : ''; };
 const fmtTel = (value = '') => { const digits = String(value).replace(/\D/g, ''); if (digits.startsWith('55') && digits.length >= 12) { const ddd = digits.slice(2, 4); const number = digits.slice(4); const middle = number.length > 8 ? `${number.slice(0, 5)}-${number.slice(5)}` : `${number.slice(0, 4)}-${number.slice(4)}`; return `+55 (${ddd}) ${middle}`; } return value || 'Telefone não informado'; };
 const iniciais = (nome = '') => String(nome).trim().split(/\s+/).filter(Boolean).map((parte) => parte[0]).slice(0, 2).join('').toUpperCase() || '—';
 const normalizarTexto = (value) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -135,6 +148,9 @@ export default function DiscadorEVS() {
   const [atualizando, setAtualizando] = useState(false);
   const [ultimaAtualizacao, setUltimaAtualizacao] = useState(null);
 
+  const [retornoEditado, setRetornoEditado] = useState(null);
+  const [avisoRetorno, setAvisoRetorno] = useState('');
+
   const deviceRef = useRef(null);
   const callRef = useRef(null);
   const timerRef = useRef(null);
@@ -162,11 +178,12 @@ export default function DiscadorEVS() {
     }).sort((a, b) => {
       const aRetorno = a.status === 'retornar' ? 0 : 1; const bRetorno = b.status === 'retornar' ? 0 : 1;
       if (aRetorno !== bRetorno) return aRetorno - bRetorno;
-      return String(a.dataRetorno || '').localeCompare(String(b.dataRetorno || ''));
+      return dataRetornoISO(a.dataRetorno).localeCompare(dataRetornoISO(b.dataRetorno));
     });
   }, [filaElegivel, busca, filtroFila]);
 
   const lead = pendente?.lead || leads.find((item) => String(item.id) === String(activeId)) || filaElegivel[0] || leads[0] || null;
+  useEffect(() => { setRetornoEditado(null); setAvisoRetorno(''); }, [lead?.id]);
   const histLead = historico.filter((item) => String(item.lead_id) === String(lead?.id));
   const histExibido = escopoHistorico === 'lead' ? histLead : historico;
   const bloqueado = leadBloqueado(lead);
@@ -658,6 +675,39 @@ export default function DiscadorEVS() {
     } finally { saveRef.current = false; setSalvando(false); }
   }
 
+
+  async function salvarRetorno() {
+    if (!lead || bloqueado || estado !== 'idle' || saveRef.current || pendingRef.current || dialingRef.current || callRef.current) return;
+    const date = dataRetornoISO(retornoEditado ?? lead.dataRetorno);
+    if (!date) { setAvisoRetorno('Escolha uma data válida para o retorno.'); return; }
+    const target = lead;
+    pausarAutomatico();
+    saveRef.current = true;
+    dataRevisionRef.current += 1;
+    setSalvando(true);
+    setAvisoRetorno('');
+    setErro('');
+    try {
+      const response = await fetch('/api/leads/retorno', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(25000),
+        body: JSON.stringify({lead_id: target.id, id_lead: target.idLead,
+          sheet_row: target.sheetRow, telefone: target.telefone, data_retorno: date}),
+      });
+      if (response.status === 401) { window.location.assign('/login'); return; }
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.ok || !body.lead) throw new Error(body.error || 'A base não confirmou a data de retorno.');
+      const updated = leadsRef.current.map((item) => String(item.id) === String(target.id)
+        ? {...item, status: 'retornar', dataRetorno: date} : item);
+      leadsRef.current = updated;
+      setLeads(updated);
+      setRetornoEditado(date);
+      setAvisoRetorno('Retorno salvo.');
+    } catch (error) {
+      setAvisoRetorno(mensagemErro(error, 'Não foi possível salvar o retorno. Tente novamente.'));
+    } finally { saveRef.current = false; setSalvando(false); }
+  }
+
   registrarRef.current = registrar;
   const repetirSalvamento = () => {
     const saved = pendingRef.current;
@@ -687,7 +737,7 @@ export default function DiscadorEVS() {
 
 <section className="call-card"><CallState estado={estado} seconds={seg} />{estado === 'idle' && <><button className="btn-primary btn-call" onClick={() => chamarLead(lead)} disabled={!pronto || !leadElegivel(lead) || Boolean(pendente) || salvando}><PhoneIcon /> {pronto ? (autoAtivo && !autoPausado ? 'Aguardando próxima...' : 'Ligar manualmente') : 'Conectando…'}</button>{autoAtivo && !autoPausado && <div className="auto-hint">Avança após não atender ou caixa postal, com até {MAX_TENTATIVAS} tentativas por lead.</div>}</>}{(estado === 'dialing' || estado === 'active') && <div className="call-controls">{estado === 'active' && <div className="call-live-note">Microfone ativo no navegador</div>}<button className="btn-primary btn-hangup" onClick={encerrar}><HangupIcon /> Encerrar</button></div>}{estado === 'wrapup' && <div className="disposition"><div className="disposition-title">Como foi a ligação?</div><div className="disposition-grid">{RESULTADOS.map((resultado) => <button key={resultado.key} className="disposition-button" style={{ borderColor: resultado.cor, color: resultado.cor }} disabled={salvando || Boolean(pendente)} onClick={() => selecionarResultado(resultado.key)}>{resultado.label}</button>)}</div>{resultadoPendente && <div className="next-step-box"><div className="next-step-title">Próximo passo: {resultadoDe(resultadoPendente)?.label}</div>{['reuniao', 'interessado', 'retornar'].includes(resultadoPendente) && <div className="next-step-fields"><label>{resultadoPendente === 'reuniao' ? 'Data da reunião' : 'Data do retorno'}<input type="date" value={dataProxima} onChange={(event) => setDataProxima(event.target.value)} /></label>{resultadoPendente === 'reuniao' && <label>Horário<input type="time" value={horaProxima} onChange={(event) => setHoraProxima(event.target.value)} /></label>}</div>}{erroResultado && <div className="field-error">{erroResultado}</div>}<div className="next-step-actions"><button className="btn-primary" disabled={salvando || Boolean(pendente)} onClick={confirmarResultado}>Salvar resultado</button><button className="btn-secondary" disabled={salvando || Boolean(pendente)} onClick={() => setResultadoPendente(null)}>Voltar</button></div></div>}</div>}<label className={`note-label ${estado === 'active' ? 'note-live' : ''}`}><span>{estado === 'active' ? 'Anotação durante o atendimento' : estado === 'wrapup' ? 'O que aconteceu neste atendimento?' : 'Anotação deste atendimento'}</span><textarea value={nota} onChange={(event) => setNota(event.target.value)} placeholder="Escreva o que aconteceu, se não atendeu, objeções, próximos passos…" /><small>Essa anotação será salva neste registro e ficará no histórico do lead.</small></label></section></>}</main>
 
-        <section className="details-panel"><div className="tabs"><button className={aba === 'ficha' ? 'active' : ''} onClick={() => setAba('ficha')}>Ficha do lead</button><button className={aba === 'historico' ? 'active' : ''} onClick={() => setAba('historico')}>Histórico {histLead.length > 0 && <span>{histLead.length}</span>}</button></div><div className="details-content scroll-area">{!lead && <div className="empty-state">Selecione um lead para ver os detalhes.</div>}{lead && aba === 'ficha' && <div className="lead-form"><ReadOnlyField label="Nome" value={lead.nome} /><ReadOnlyField label="Negócio" value={lead.negocio} /><ReadOnlyField label="Telefone (E.164)" value={lead.telefone} hint="Formato +55 + DDD + número" /><div className="two-columns"><ReadOnlyField label="E-mail" value={lead.email} /><ReadOnlyField label="Instagram" value={lead.instagram} /></div><div className="section-title">Qualificação</div><div className="two-columns"><ReadOnlyField label="Faturamento" value={lead.faturamento} /><ReadOnlyField label="Cargo" value={lead.cargo} /></div><ReadOnlyField label="Número de vendedores" value={lead.numeroVendedores} hint="Campo M da Base_Geral" /><ReadOnlyField label="Consegue ficar 10 dias fora do negócio?" value={lead.dezDias} /><ReadOnlyField label="Principal desafio" value={lead.desafio} multiline /><div className="section-title">Gestão</div><button className="btn-secondary" type="button" onClick={naoLigarMais} disabled={bloqueado || estado !== 'idle' || Boolean(pendente) || salvando}>{salvando ? 'Salvando…' : 'Não ligar mais'}</button><div className="two-columns"><ReadOnlyField label="Origem / etiqueta" value={lead.origem} /><ReadOnlyField label="Status na fila" value={statusLabel[lead.status] || lead.status} /></div><ReadOnlyField label="Resultado" value={lead.resultado} /><ReadOnlyField label="Motivo de bloqueio" value={lead.motivoBloqueio} /><div className="read-only-note">A ficha é alimentada pela Base_Geral. As alterações operacionais da ligação são registradas no histórico.</div></div>}{lead && aba === 'historico' && <div><div className="kabam-box"><strong>Kabam / BotConversa</strong><div>{kabamOutbox.length ? `${kabamOutbox.length} comentário(s) escrito(s) aguardando sincronização.` : 'Comentários escritos ficarão prontos para sincronização.'}</div><small>Preparado · o envio será ligado quando o endpoint do Kabam for definido.</small></div><div className="history-tabs"><button className={escopoHistorico === 'lead' ? 'active' : ''} onClick={() => setEscopoHistorico('lead')}>Deste lead</button><button className={escopoHistorico === 'todas' ? 'active' : ''} onClick={() => setEscopoHistorico('todas')}>Todas carregadas</button></div>{!histExibido.length && <div className="empty-state">Nenhuma ligação registrada ainda.</div>}{histExibido.map((item) => { const resultado = resultadoDe(item.resultado); return <div className="history-item" key={item.id}><div className="history-bar" style={{ background: resultado?.cor || C.suave }} /><div><div className="history-title">{escopoHistorico === 'todas' && <strong>{leads.find((current) => String(current.id) === String(item.lead_id))?.nome || 'Lead'}</strong>}<span style={{ color: resultado?.cor || C.suave }}>{resultado?.label || item.resultado}</span></div><div className="history-meta">{fmtDataHora(item.created_at)} · {item.tentativa ? `Tentativa ${item.tentativa}` : 'Atendimento registrado'} · {item.duracao_seg > 0 ? fmtCron(item.duracao_seg) : 'sem fala'}</div>{item.nota && <div className="history-note">{item.nota}</div>}{item.nota && <div className="kabam-pending">Comentário pronto para o Kabam</div>}</div></div>; })}</div>}</div></section>
+        <section className="details-panel"><div className="tabs"><button className={aba === 'ficha' ? 'active' : ''} onClick={() => setAba('ficha')}>Ficha do lead</button><button className={aba === 'historico' ? 'active' : ''} onClick={() => setAba('historico')}>Histórico {histLead.length > 0 && <span>{histLead.length}</span>}</button></div><div className="details-content scroll-area">{!lead && <div className="empty-state">Selecione um lead para ver os detalhes.</div>}{lead && aba === 'ficha' && <div className="lead-form"><ReadOnlyField label="Nome" value={lead.nome} /><ReadOnlyField label="Negócio" value={lead.negocio} /><ReadOnlyField label="Telefone (E.164)" value={lead.telefone} hint="Formato +55 + DDD + número" /><div className="two-columns"><ReadOnlyField label="E-mail" value={lead.email} /><ReadOnlyField label="Instagram" value={lead.instagram} /></div><div className="section-title">Qualificação</div><div className="two-columns"><ReadOnlyField label="Faturamento" value={lead.faturamento} /><ReadOnlyField label="Cargo" value={lead.cargo} /></div><ReadOnlyField label="Número de vendedores" value={lead.numeroVendedores} hint="Campo M da Base_Geral" /><ReadOnlyField label="Consegue ficar 10 dias fora do negócio?" value={lead.dezDias} /><ReadOnlyField label="Principal desafio" value={lead.desafio} multiline /><div className="section-title">Gestão</div><div className="next-step-fields"><label>Data do retorno<input type="date" aria-label="Editar data do retorno" value={retornoEditado ?? dataRetornoISO(lead.dataRetorno)} disabled={bloqueado || estado !== 'idle' || Boolean(pendente) || salvando} onChange={(event) => { setRetornoEditado(event.target.value); setAvisoRetorno(''); }} /></label></div><button className="btn-secondary" type="button" onClick={salvarRetorno} disabled={bloqueado || estado !== 'idle' || Boolean(pendente) || salvando}>{salvando ? 'Salvando…' : 'Salvar retorno'}</button>{avisoRetorno && <div role="status">{avisoRetorno}</div>}<button className="btn-secondary" type="button" onClick={naoLigarMais} disabled={bloqueado || estado !== 'idle' || Boolean(pendente) || salvando}>{salvando ? 'Salvando…' : 'Não ligar mais'}</button><div className="two-columns"><ReadOnlyField label="Origem / etiqueta" value={lead.origem} /><ReadOnlyField label="Status na fila" value={statusLabel[lead.status] || lead.status} /></div><ReadOnlyField label="Resultado" value={lead.resultado} /><ReadOnlyField label="Motivo de bloqueio" value={lead.motivoBloqueio} /><div className="read-only-note">A ficha é alimentada pela Base_Geral. As alterações operacionais da ligação são registradas no histórico.</div></div>}{lead && aba === 'historico' && <div><div className="kabam-box"><strong>Kabam / BotConversa</strong><div>{kabamOutbox.length ? `${kabamOutbox.length} comentário(s) escrito(s) aguardando sincronização.` : 'Comentários escritos ficarão prontos para sincronização.'}</div><small>Preparado · o envio será ligado quando o endpoint do Kabam for definido.</small></div><div className="history-tabs"><button className={escopoHistorico === 'lead' ? 'active' : ''} onClick={() => setEscopoHistorico('lead')}>Deste lead</button><button className={escopoHistorico === 'todas' ? 'active' : ''} onClick={() => setEscopoHistorico('todas')}>Todas carregadas</button></div>{!histExibido.length && <div className="empty-state">Nenhuma ligação registrada ainda.</div>}{histExibido.map((item) => { const resultado = resultadoDe(item.resultado); return <div className="history-item" key={item.id}><div className="history-bar" style={{ background: resultado?.cor || C.suave }} /><div><div className="history-title">{escopoHistorico === 'todas' && <strong>{leads.find((current) => String(current.id) === String(item.lead_id))?.nome || 'Lead'}</strong>}<span style={{ color: resultado?.cor || C.suave }}>{resultado?.label || item.resultado}</span></div><div className="history-meta">{fmtDataHora(item.created_at)} · {item.tentativa ? `Tentativa ${item.tentativa}` : 'Atendimento registrado'} · {item.duracao_seg > 0 ? fmtCron(item.duracao_seg) : 'sem fala'}</div>{item.nota && <div className="history-note">{item.nota}</div>}{item.nota && <div className="kabam-pending">Comentário pronto para o Kabam</div>}</div></div>; })}</div>}</div></section>
       </div>
     </div>
   );
