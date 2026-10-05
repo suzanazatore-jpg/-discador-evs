@@ -105,7 +105,9 @@ function leadBloqueado(lead) {
 }
 
 function leadElegivel(lead) {
-  return Boolean(lead) && ['novo', 'retornar'].includes(normalizarTexto(lead.status)) && Number(lead.tentativas || 0) < MAX_TENTATIVAS && !leadBloqueado(lead);
+  const retorno = dataRetornoISO(lead?.dataRetorno);
+  const futuro = normalizarTexto(lead?.status) === 'retornar' && retorno && retorno > dataLocalISO();
+  return Boolean(lead) && !futuro && ['novo', 'retornar'].includes(normalizarTexto(lead.status)) && Number(lead.tentativas || 0) < MAX_TENTATIVAS && !leadBloqueado(lead);
 }
 
 function safeStorageRead(key, fallback) { try { if (typeof window === 'undefined') return fallback; const value = window.localStorage.getItem(key); return value ? JSON.parse(value) : fallback; } catch (_) { return fallback; } }
@@ -211,7 +213,7 @@ export default function DiscadorEVS() {
 
 
   const carregarDados = async ({ silencioso = false } = {}) => {
-    if (refreshRef.current || pendingRef.current || callRef.current || dialingRef.current) return;
+    if (refreshRef.current || saveRef.current || pendingRef.current || callRef.current || dialingRef.current) return;
     refreshRef.current = true;
     const revision = dataRevisionRef.current;
     if (!silencioso) setAtualizando(true);
