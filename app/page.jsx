@@ -411,13 +411,13 @@ export default function DiscadorEVS() {
         const manual = manualHangupRef.current;
         setEstado('checking');
         try {
-          const outcome = manual ? null : (confirmed || await readCallOutcome(sidRef.current));
-          if (!vigente()) return;
           if (error && erroTecnicoPulavel(error)) {
             call.disconnect();
             avancarAposFalhaTecnica(target, error, automatico);
             return;
           }
+          const outcome = manual ? null : (confirmed || await readCallOutcome(sidRef.current));
+          if (!vigente()) return;
           // Release the browser connection only after a terminal event/status.
           // Late SDK events are ignored by the guard above.
           call.disconnect();
