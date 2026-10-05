@@ -18,7 +18,7 @@ function ui() {
     console, Date, String, Number, Boolean, JSON, Math, AbortSignal,
     crypto:{randomUUID:()=>`mock-${++tick}`},
     navigator:{mediaDevices:{getUserMedia:async()=>({getTracks:()=>[]})}},
-    window:{location:{assign:x=>redirects.push(x)},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v)}},
+    window:{confirm:()=>true,location:{assign:x=>redirects.push(x)},localStorage:{getItem:k=>storage.get(k),setItem:(k,v)=>storage.set(k,v)}},
     fetch:async(url,opts)=>{requests.push({url,opts});return url==='/api/token'?{ok:true,status:200,json:async()=>({token:'fake'})}:response;},
     setTimeout:(fn)=>{const id=++tick;timers.set(id,fn);return id;},clearTimeout:id=>timers.delete(id),
     setInterval:()=>0,clearInterval:()=>{},
@@ -27,7 +27,7 @@ function ui() {
     useMemo:fn=>fn(),useEffect:fn=>effects.push(fn),
   });
   let code=source.replace(/import React[^;]+;/,'').replace(/import \{ readCallOutcome \}[^;]+;/,'').replace('export default function','function');
-  code=code.slice(0,code.indexOf('  return (\n    <div className="app-shell">'))+`return {chamarLead,iniciarAutomatico,pausarAutomatico,registrar,repetirSalvamento,leadsRef,deviceRef,pendingRef,autoAtivoRef,autoPausadoRef,leadElegivel,saveRef};}\n globalThis.render=DiscadorEVS;`;
+  code=code.slice(0,code.indexOf('  return (\n    <div className="app-shell">'))+`return {naoLigarMais,chamarLead,iniciarAutomatico,pausarAutomatico,registrar,repetirSalvamento,leadsRef,deviceRef,pendingRef,autoAtivoRef,autoPausadoRef,leadElegivel,saveRef};}\n globalThis.render=DiscadorEVS;`;
   vm.runInContext(code,context);
   const render=()=>{stateIndex=refIndex=0;return context.render();};
   let api=render();states[9]=true;
@@ -56,6 +56,9 @@ function ui() {
  h=ui();h.states[0]=[h.A,h.B,{...h.B,id:'C',idLead:'C'}];h.api=h.render();h.api.iniciarAutomatico();await new Promise(setImmediate);
  for(let i=0;i<3;i++) { await h.events.disconnect(); await new Promise(setImmediate);h.api=h.render();if(i<2){const [id,next]=[...h.timers.entries()][0];h.timers.delete(id);await next();await new Promise(setImmediate);}}
  const attempted=h.requests.filter(r=>r.url==='/api/ligacoes').map(r=>JSON.parse(r.opts.body).lead_id);assert.deepEqual(attempted,['A','B','C']);assert.equal(h.getConnects(),3);console.log('PASS three consecutive unanswered calls advance A -> B -> C without restart');
+ h=ui();h.setResponse({ok:true,status:200,json:async()=>({ok:true,lead:{tags_pabbly:'nao_ligar',motivo_bloqueio:'Retirado da fila pela operadora'}})});await h.api.naoLigarMais();assert.equal(h.requests.at(-1).url,'/api/leads/bloquear');assert.equal(h.api.leadElegivel(h.states[0][0]),false);assert.equal(h.states[4],'B');assert.equal(h.states[5].length,0);assert.equal(h.getConnects(),0);console.log('PASS remove contact persists block, advances queue without call or history');
+ h=ui();h.setResponse({ok:false,status:502,json:async()=>({error:'offline'})});await h.api.naoLigarMais();assert.equal(h.api.leadElegivel(h.states[0][0]),true);assert.equal(h.api.saveRef.current,false);assert.equal(h.api.autoPausadoRef.current,true);console.log('PASS failed removal leaves contact eligible and controls unlocked');
+ h=ui();h.api.pendingRef.current={payload:{}};await h.api.naoLigarMais();assert.equal(h.requests.length,0);console.log('PASS pending call result prevents conflicting removal');
  // Google Apps Script in-memory integration test; no real Google APIs.
  const base=[Array(28).fill(''),['A','','Mock','','+5511999990000',...Array(23).fill('')]];
  const history=[['ID_Historico']];let failBase=false,locks=0;
@@ -72,5 +75,6 @@ function ui() {
  failBase=true;assert.throws(()=>ctx.discRegistrarLigacao_(payload),/partial write/);assert.equal(history.length,2);ctx.discRegistrarLigacao_(payload);ctx.discRegistrarLigacao_(payload);assert.equal(history.length,2);assert.equal(base[1][15],'Retornar');assert.equal(locks,0);console.log('PASS partial sheet write repair and response-loss retry do not duplicate history');
  assert.throws(()=>ctx.discRegistrarLigacao_({...payload,nota:'different'}),/conteúdo/);console.log('PASS event content is immutable');
  ctx.discRegistrarLigacao_({...payload,event_id:'EVS-next',resultado:'sem_interesse',tentativa:1});ctx.discRegistrarLigacao_(payload);assert.equal(base[1][15],'Descartado');assert.equal(history.length,3);console.log('PASS delayed replay cannot undo a newer result');
+ const previousResult=base[1][19],previousAttempts=history.length,previousDate=base[1][20];base[1][17]='formula sentinel';ctx.discBloquearLead_({id_lead:'A',sheet_row:2,telefone:'+5511999990000'});ctx.discBloquearLead_({id_lead:'A',sheet_row:2,telefone:'+5511999990000'});assert.equal(base[1][15],'Descartado');assert.equal(base[1][17],'formula sentinel');assert.equal(base[1][19],previousResult);assert.equal(base[1][20],previousDate);assert.equal(history.length,previousAttempts);assert.equal(base[1][16].split('nao_ligar').length,2);assert.equal(locks,0);assert.throws(()=>ctx.discBloquearLead_({id_lead:'wrong',sheet_row:2,telefone:'+5511999990000'}),/ID_Lead/);assert.throws(()=>ctx.discBloquearLead_({sheet_row:2}),/ID ou telefone/);assert.equal(locks,0);console.log('PASS removal preserves formula, result, call count; retries are idempotent and identity checked');
  console.log('Core persistence and concurrency regressions passed; all network/call/Sheets operations mocked.');
 })().catch(e=>{console.error(e);process.exitCode=1;});

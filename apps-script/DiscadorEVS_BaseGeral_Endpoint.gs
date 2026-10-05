@@ -1,16 +1,11 @@
 /*
  * Discador EVS — endpoint exclusivo da Base_Geral
  *
- * Este arquivo deve ser publicado como um Web App separado do Apps Script do
- * dashboard financeiro. Assim, não altera os fluxos do Pabbly nem a rotina
- * Resumo_Diario já existente.
- *
  * Publicação:
  * 1. Cole este arquivo em um novo projeto do Apps Script.
- * 2. Confirme o ID da planilha em DISC_ENV.SPREADSHEET_ID.
- * 3. Crie a propriedade DISCADOR_API_TOKEN (obrigatória).
- * 4. Deploy > New deployment > Web app > Execute as me > Anyone with the link.
- * 5. Use a URL gerada em BASE_GERAL_APPS_SCRIPT_URL no Vercel.
+ * 2. Publique como Web App.
+ * 3. Executar como: você.
+ * 4. Quem tem acesso: qualquer pessoa com o link.
  */
 
 var DISC_ENV = {
@@ -90,15 +85,24 @@ function doGet(e) {
       error: 'Ação inválida. Use discador_fila ou discador_historico.'
     });
   } catch (error) {
-    return discJson_({ success: false, error: error.message });
+    return discJson_({
+      success: false,
+      error: error.message
+    });
   }
 }
 
 function doPost(e) {
   try {
     var body = {};
+
     if (e && e.postData && e.postData.contents) {
       body = JSON.parse(e.postData.contents);
+    }
+
+    if (body.action === 'discador_bloquear_lead') {
+      discAuthorize_(body.token);
+      return discJson_(discBloquearLead_(body));
     }
 
     if (body.action === 'discador_registrar_ligacao') {
@@ -106,63 +110,133 @@ function doPost(e) {
       return discJson_(discRegistrarLigacao_(body));
     }
 
-    return discJson_({ success: false, error: 'Ação inválida.' });
+    return discJson_({
+      success: false,
+      error: 'Ação inválida.'
+    });
   } catch (error) {
-    return discJson_({ success: false, error: error.message });
+    return discJson_({
+      success: false,
+      error: error.message
+    });
   }
 }
 
+function discBloquearLead_(body) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var id = String(body.id_lead || body.lead_id || '').trim();
+    var phone = discDigits_(body.telefone);
+    if ((!id || id.indexOf('sheet-row-') === 0) && !phone) {
+      throw new Error('Informe o ID ou telefone do contato.');
+    }
+    var sheet = discBaseSheet_();
+    var sheetRow = discResolveRow_(sheet, {sheet_row: body.sheet_row, id_lead: id, telefone: phone});
+    var row = sheet.getRange(sheetRow, 1, 1, DISC_COL.observacao).getDisplayValues()[0];
+    var storedId = String(row[DISC_COL.idLead - 1] || '').trim();
+    var storedPhone = discDigits_(row[DISC_COL.whatsapp - 1]);
+    if ((id && id.indexOf('sheet-row-') !== 0 && storedId !== id) ||
+        (phone && storedPhone !== phone) || discEmptyRow_(row)) {
+      throw new Error('O contato mudou na planilha. Atualize a fila.');
+    }
+    // Preserve the formula in Pode_Ligar and every previous call result.
+    var tags = discMergeTags_(row[DISC_COL.tagsPabbly - 1], 'nao_ligar');
+    sheet.getRange(sheetRow, DISC_COL.tagsPabbly).setValue(tags);
+    sheet.getRange(sheetRow, DISC_COL.status).setValue('Descartado');
+    sheet.getRange(sheetRow, DISC_COL.motivoBloqueio).setValue('Retirado da fila pela operadora');
+    sheet.getRange(sheetRow, DISC_COL.proximaAcao).setValue('Sem ação');
+    SpreadsheetApp.flush();
+    return {success: true, ok: true, source: 'Base_Geral', lead: {
+      id: storedId || 'sheet-row-' + sheetRow, sheet_row: sheetRow,
+      status: 'Descartado', tags_pabbly: tags, pode_ligar: 'NÃO',
+      motivo_bloqueio: 'Retirado da fila pela operadora'
+    }};
+  } finally { lock.releaseLock(); }
+}
+
 function discAuthorize_(token) {
-  var expected = PropertiesService.getScriptProperties().getProperty(DISC_ENV.tokenProperty);
-  if (!expected) {
-    throw new Error('O token do Discador EVS ainda não foi configurado.');
-  }
-  if (String(token || '') !== String(expected)) {
+  var expected = PropertiesService
+    .getScriptProperties()
+    .getProperty(DISC_ENV.tokenProperty);
+
+  if (expected && String(token || '') !== String(expected)) {
     throw new Error('Token do Discador EVS inválido.');
   }
 }
 
 function discSpreadsheet_() {
-  var configured = PropertiesService.getScriptProperties().getProperty('DISC_SPREADSHEET_ID');
-  return SpreadsheetApp.openById(configured || DISC_ENV.spreadsheetId);
+  var configured = PropertiesService
+    .getScriptProperties()
+    .getProperty('DISC_SPREADSHEET_ID');
+
+  return SpreadsheetApp.openById(
+    configured || DISC_ENV.spreadsheetId
+  );
 }
 
 function discBaseSheet_() {
-  var sheet = discSpreadsheet_().getSheetByName(DISC_ENV.baseSheet);
-  if (!sheet) throw new Error('A aba Base_Geral não foi encontrada.');
-  if (sheet.getLastColumn() < DISC_COL.observacao) {
-    throw new Error('A aba Base_Geral precisa conter as colunas A:AB.');
+  var sheet = discSpreadsheet_()
+    .getSheetByName(DISC_ENV.baseSheet);
+
+  if (!sheet) {
+    throw new Error('A aba Base_Geral não foi encontrada.');
   }
+
+  if (sheet.getLastColumn() < DISC_COL.observacao) {
+    throw new Error(
+      'A aba Base_Geral precisa conter as colunas A:AB.'
+    );
+  }
+
   return sheet;
 }
 
 function discListarLeads_() {
   var sheet = discBaseSheet_();
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return { success: true, source: 'Base_Geral', leads: [] };
 
-  var values = sheet.getRange(1, 1, lastRow, DISC_COL.observacao).getDisplayValues();
+  if (lastRow < 2) {
+    return {
+      success: true,
+      source: 'Base_Geral',
+      leads: []
+    };
+  }
+
+  var values = sheet
+    .getRange(1, 1, lastRow, DISC_COL.observacao)
+    .getDisplayValues();
+
   var tentativas = discAttempts_();
   var leads = [];
 
   for (var i = 1; i < values.length; i++) {
     var row = values[i];
-    if (discEmptyRow_(row)) continue;
+
+    if (discEmptyRow_(row)) {
+      continue;
+    }
 
     var sheetRow = i + 1;
-    var idLead = String(row[DISC_COL.idLead - 1] || '').trim();
+    var idLead = String(
+      row[DISC_COL.idLead - 1] || ''
+    ).trim();
+
     var leadId = idLead || 'sheet-row-' + sheetRow;
 
     leads.push({
       id: leadId,
       id_lead: idLead,
       sheet_row: sheetRow,
+
       data: row[DISC_COL.data - 1] || '',
       nome: row[DISC_COL.nome - 1] || '',
       email: row[DISC_COL.email - 1] || '',
       telefone: row[DISC_COL.whatsapp - 1] || '',
       whatsapp: row[DISC_COL.whatsapp - 1] || '',
       instagram: row[DISC_COL.instagram - 1] || '',
+
       negocio: row[DISC_COL.negocio - 1] || '',
       faturamento: row[DISC_COL.faturamento - 1] || '',
       estoque: row[DISC_COL.estoque - 1] || '',
@@ -171,11 +245,13 @@ function discListarLeads_() {
       desafio: row[DISC_COL.desafio - 1] || '',
       numero_vendedores: row[DISC_COL.numeroVendedores - 1] || '',
       compromisso: row[DISC_COL.compromisso - 1] || '',
+
       etiqueta: row[DISC_COL.etiqueta - 1] || '',
       origem: row[DISC_COL.etiqueta - 1] || '',
       status: row[DISC_COL.status - 1] || '',
       tags_pabbly: row[DISC_COL.tagsPabbly - 1] || '',
       tags: discSplitTags_(row[DISC_COL.tagsPabbly - 1]),
+
       pode_ligar: row[DISC_COL.podeLigar - 1] || '',
       motivo_bloqueio: row[DISC_COL.motivoBloqueio - 1] || '',
       resultado: row[DISC_COL.resultado - 1] || '',
@@ -187,6 +263,7 @@ function discListarLeads_() {
       produto: row[DISC_COL.produto - 1] || '',
       equipe: row[DISC_COL.equipe - 1] || '',
       observacao: row[DISC_COL.observacao - 1] || '',
+
       tentativas: tentativas[leadId] || 0
     });
   }
@@ -201,19 +278,38 @@ function discListarLeads_() {
 }
 
 function discListarHistorico_(limit) {
-  var sheet = discSpreadsheet_().getSheetByName(DISC_ENV.historySheet);
+  var sheet = discSpreadsheet_()
+    .getSheetByName(DISC_ENV.historySheet);
+
   if (!sheet || sheet.getLastRow() < 2) {
-    return { success: true, source: DISC_ENV.historySheet, ligacoes: [] };
+    return {
+      success: true,
+      source: DISC_ENV.historySheet,
+      ligacoes: []
+    };
   }
 
   var lastRow = sheet.getLastRow();
-  var startRow = Math.max(2, lastRow - Math.max(1, limit) + 1);
-  var values = sheet.getRange(startRow, 1, lastRow - startRow + 1, DISC_HISTORY_HEADERS.length).getDisplayValues();
+  var startRow = Math.max(
+    2,
+    lastRow - Math.max(1, limit) + 1
+  );
+
+  var values = sheet
+    .getRange(
+      startRow,
+      1,
+      lastRow - startRow + 1,
+      DISC_HISTORY_HEADERS.length
+    )
+    .getDisplayValues();
+
   var ligacoes = [];
 
   for (var i = values.length - 1; i >= 0; i--) {
     var row = values[i];
     var leadId = row[3] || ('sheet-row-' + row[2]);
+
     ligacoes.push({
       id: row[0],
       created_at: discIsoDate_(row[1]),
@@ -232,7 +328,11 @@ function discListarHistorico_(limit) {
     });
   }
 
-  return { success: true, source: DISC_ENV.historySheet, ligacoes: ligacoes };
+  return {
+    success: true,
+    source: DISC_ENV.historySheet,
+    ligacoes: ligacoes
+  };
 }
 
 function discRegistrarLigacao_(body) {
@@ -368,63 +468,185 @@ function discResolveRow_(sheet, body) {
   var id = String(body.id_lead || '').trim();
   var phone = discDigits_(body.telefone);
 
-  if (requested >= 2 && requested <= sheet.getLastRow()) {
-    var row = sheet.getRange(requested, 1, 1, DISC_COL.whatsapp).getDisplayValues()[0];
-    var storedId = String(row[DISC_COL.idLead - 1] || '').trim();
-    var storedPhone = discDigits_(row[DISC_COL.whatsapp - 1]);
-    if (id && id.indexOf('sheet-row-') !== 0 && storedId && storedId !== id) {
-      throw new Error('A linha da Base_Geral não corresponde ao ID_Lead enviado.');
+  if (
+    requested >= 2 &&
+    requested <= sheet.getLastRow()
+  ) {
+    var row = sheet
+      .getRange(
+        requested,
+        1,
+        1,
+        DISC_COL.whatsapp
+      )
+      .getDisplayValues()[0];
+
+    var storedId = String(
+      row[DISC_COL.idLead - 1] || ''
+    ).trim();
+
+    var storedPhone = discDigits_(
+      row[DISC_COL.whatsapp - 1]
+    );
+
+    if (
+      id &&
+      id.indexOf('sheet-row-') !== 0 &&
+      storedId &&
+      storedId !== id
+    ) {
+      throw new Error(
+        'A linha da Base_Geral não corresponde ao ID_Lead enviado.'
+      );
     }
-    if (phone && storedPhone && phone !== storedPhone) {
-      throw new Error('A linha da Base_Geral não corresponde ao telefone enviado.');
+
+    if (
+      phone &&
+      storedPhone &&
+      phone !== storedPhone
+    ) {
+      throw new Error(
+        'A linha da Base_Geral não corresponde ao telefone enviado.'
+      );
     }
+
     return requested;
   }
 
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) throw new Error('A Base_Geral não possui leads.');
-  var values = sheet.getRange(2, 1, lastRow - 1, DISC_COL.whatsapp).getDisplayValues();
+
+  if (lastRow < 2) {
+    throw new Error(
+      'A Base_Geral não possui leads.'
+    );
+  }
+
+  var values = sheet
+    .getRange(
+      2,
+      1,
+      lastRow - 1,
+      DISC_COL.whatsapp
+    )
+    .getDisplayValues();
+
   var matches = [];
+
   for (var i = 0; i < values.length; i++) {
-    var sameId = id && String(values[i][DISC_COL.idLead - 1] || '').trim() === id;
-    var samePhone = phone && discDigits_(values[i][DISC_COL.whatsapp - 1]) === phone;
-    if (sameId || samePhone) matches.push(i + 2);
+    var sameId =
+      id &&
+      String(
+        values[i][DISC_COL.idLead - 1] || ''
+      ).trim() === id;
+
+    var samePhone =
+      phone &&
+      discDigits_(
+        values[i][DISC_COL.whatsapp - 1]
+      ) === phone;
+
+    if (sameId || samePhone) {
+      matches.push(i + 2);
+    }
   }
+
   if (matches.length !== 1) {
-    throw new Error(matches.length ? 'Mais de uma linha corresponde ao lead.' : 'Lead não encontrado na Base_Geral.');
+    throw new Error(
+      matches.length
+        ? 'Mais de uma linha corresponde ao lead.'
+        : 'Lead não encontrado na Base_Geral.'
+    );
   }
+
   return matches[0];
 }
 
 function discHistorySheet_() {
   var ss = discSpreadsheet_();
-  var sheet = ss.getSheetByName(DISC_ENV.historySheet);
-  if (!sheet) sheet = ss.insertSheet(DISC_ENV.historySheet);
+
+  var sheet = ss.getSheetByName(
+    DISC_ENV.historySheet
+  );
+
+  if (!sheet) {
+    sheet = ss.insertSheet(
+      DISC_ENV.historySheet
+    );
+  }
+
   if (sheet.getLastRow() === 0) {
-    sheet.getRange(1, 1, 1, DISC_HISTORY_HEADERS.length).setValues([DISC_HISTORY_HEADERS]);
+    sheet
+      .getRange(
+        1,
+        1,
+        1,
+        DISC_HISTORY_HEADERS.length
+      )
+      .setValues([DISC_HISTORY_HEADERS]);
+
     sheet.setFrozenRows(1);
   }
+
   return sheet;
 }
 
 function discAttempts_() {
-  var sheet = discSpreadsheet_().getSheetByName(DISC_ENV.historySheet);
+  var sheet = discSpreadsheet_()
+    .getSheetByName(DISC_ENV.historySheet);
+
   var counts = {};
-  if (!sheet || sheet.getLastRow() < 2) return counts;
-  var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, DISC_HISTORY_HEADERS.length).getDisplayValues();
+
+  if (!sheet || sheet.getLastRow() < 2) {
+    return counts;
+  }
+
+  var values = sheet
+    .getRange(
+      2,
+      1,
+      sheet.getLastRow() - 1,
+      DISC_HISTORY_HEADERS.length
+    )
+    .getDisplayValues();
+
   for (var i = 0; i < values.length; i++) {
     var resultado = values[i][6];
-    if (resultado !== 'nao_atendeu' && resultado !== 'caixa') continue;
-    var key = values[i][3] || ('sheet-row-' + values[i][2]);
+
+    if (
+      resultado !== 'nao_atendeu' &&
+      resultado !== 'caixa'
+    ) {
+      continue;
+    }
+
+    var key =
+      values[i][3] ||
+      ('sheet-row-' + values[i][2]);
+
     counts[key] = (counts[key] || 0) + 1;
   }
+
   return counts;
 }
 
 function discStatus_(resultado, limite) {
-  if (limite) return 'Limite de tentativas';
-  if (resultado === 'reuniao') return 'Agendou';
-  if (resultado === 'interessado' || resultado === 'retornar' || resultado === 'nao_atendeu' || resultado === 'caixa') return 'Retornar';
+  if (limite) {
+    return 'Limite de tentativas';
+  }
+
+  if (resultado === 'reuniao') {
+    return 'Agendou';
+  }
+
+  if (
+    resultado === 'interessado' ||
+    resultado === 'retornar' ||
+    resultado === 'nao_atendeu' ||
+    resultado === 'caixa'
+  ) {
+    return 'Retornar';
+  }
+
   return 'Descartado';
 }
 
@@ -438,67 +660,142 @@ function discResultadoLabel_(resultado) {
     numero_errado: 'Número errado',
     sem_interesse: 'Sem interesse'
   };
+
   return labels[resultado] || resultado;
 }
 
 function discTag_(resultado, limite) {
-  if (limite) return 'nao_ligar';
+  if (limite) {
+    return 'nao_ligar';
+  }
+
   return 'discador_' + resultado;
 }
 
 function discMergeTags_(current, added) {
   var tags = discSplitTags_(current);
-  if (added && tags.map(discNorm_).indexOf(discNorm_(added)) === -1) tags.push(added);
+
+  if (
+    added &&
+    tags.map(discNorm_).indexOf(
+      discNorm_(added)
+    ) === -1
+  ) {
+    tags.push(added);
+  }
+
   return tags.join(', ');
 }
 
 function discSplitTags_(value) {
-  return String(value || '').split(/[,;|]/).map(function(item) { return item.trim(); }).filter(Boolean);
+  return String(value || '')
+    .split(/[,;|]/)
+    .map(function(item) {
+      return item.trim();
+    })
+    .filter(Boolean);
 }
 
 function discSetDate_(range, value) {
-  if (value === null || value === undefined || String(value).trim() === '') {
+  if (
+    value === null ||
+    value === undefined ||
+    String(value).trim() === ''
+  ) {
     range.clearContent();
     return;
   }
+
   var text = String(value).trim();
-  var match = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+
+  var match = text.match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/
+  );
+
   if (!match) {
     range.setValue(text);
     return;
   }
-  var date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4] || 0), Number(match[5] || 0), 0);
+
+  var date = new Date(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4] || 0),
+    Number(match[5] || 0),
+    0
+  );
+
   range.setValue(date);
 }
 
 function discIsoDate_(value) {
-  if (!value) return '';
-  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+  if (!value) {
+    return '';
+  }
+
+  if (
+    Object.prototype.toString.call(value) ===
+      '[object Date]' &&
+    !isNaN(value.getTime())
+  ) {
     return value.toISOString();
   }
+
   var text = String(value);
-  var br = text.match(/^(\d{2})\/(\d{2})\/(\d{2,4})(?:[ ,T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+
+  var br = text.match(
+    /^(\d{2})\/(\d{2})\/(\d{2,4})(?:[ ,T](\d{2}):(\d{2})(?::(\d{2}))?)?/
+  );
+
   if (br) {
-    var year = Number(br[3]) < 100 ? 2000 + Number(br[3]) : Number(br[3]);
-    var brDate = new Date(year, Number(br[2]) - 1, Number(br[1]), Number(br[4] || 0), Number(br[5] || 0), Number(br[6] || 0));
-    if (!isNaN(brDate.getTime())) return brDate.toISOString();
+    var year =
+      Number(br[3]) < 100
+        ? 2000 + Number(br[3])
+        : Number(br[3]);
+
+    var brDate = new Date(
+      year,
+      Number(br[2]) - 1,
+      Number(br[1]),
+      Number(br[4] || 0),
+      Number(br[5] || 0),
+      Number(br[6] || 0)
+    );
+
+    if (!isNaN(brDate.getTime())) {
+      return brDate.toISOString();
+    }
   }
+
   var date = new Date(value);
-  return isNaN(date.getTime()) ? String(value) : date.toISOString();
+
+  return isNaN(date.getTime())
+    ? String(value)
+    : date.toISOString();
 }
 
 function discEmptyRow_(row) {
-  return row.every(function(value) { return String(value || '').trim() === ''; });
+  return row.every(function(value) {
+    return String(value || '').trim() === '';
+  });
 }
 
 function discDigits_(value) {
-  return String(value || '').replace(/\D/g, '');
+  return String(value || '')
+    .replace(/\D/g, '');
 }
 
 function discNorm_(value) {
-  return String(value || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
 }
 
 function discJson_(data) {
-  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
+  return ContentService
+    .createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
 }
