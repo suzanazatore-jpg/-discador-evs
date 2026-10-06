@@ -53,6 +53,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .logout-btn { margin-left: 4px; padding: 6px 9px; border: 1px solid rgba(234,223,192,.7); border-radius: 7px; background: transparent; color: var(--gold-soft); font-size: 11px; }
 .logout-btn:hover { border-color: var(--gold); color: #fff; }
 .alert-error { margin: 12px 18px 0; padding: 10px 14px; border: 1px solid #E2A4A4; border-radius: 9px; background: #FCEBEB; color: #8D2929; font-size: 13px; }
+.sync-notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 18px 0; padding: 9px 12px; border: 1px solid var(--gold-soft); border-radius: 9px; background: #FBF7F0; color: var(--ink); font-size: 12px; }
+.sync-notice strong { color: var(--wine); }
+.sync-notice span { color: var(--amber); }
+.sync-notice .btn-secondary { margin-left: auto; padding: 7px 10px; }
 
 .workspace { display: grid; grid-template-columns: 260px minmax(0, 1fr) 340px; min-height: calc(100vh - 79px); }
 .queue-panel, .details-panel { min-height: 0; background: var(--panel); }
