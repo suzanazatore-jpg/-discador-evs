@@ -318,8 +318,12 @@ export default function DiscadorEVS() {
       setUltimaAtualizacao(new Date());
       if (!silencioso && !pendingRef.current) setErro('');
     } catch (error) {
-      pausarAutomatico();
-      setErro(mensagemErro(error, 'Falha ao atualizar a fila.'));
+      // A atualização automática roda em segundo plano. Se a Base_Geral
+      // demorar, mantemos a fila já carregada e tentamos novamente depois,
+      // sem interromper a operação nem exibir um erro vermelho para a vendedora.
+      if (!silencioso) {
+        setErro('A atualização da fila demorou mais que o esperado. A fila atual continua disponível; tente Atualizar fila novamente.');
+      }
     } finally {
       refreshRef.current = false;
       setAtualizando(false);
