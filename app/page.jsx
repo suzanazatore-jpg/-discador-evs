@@ -14,6 +14,7 @@ const MAX_TENTATIVAS = 3;
 const AUTO_NEXT_DELAY_MS = 900;
 const AUTO_REFRESH_MS = 30000;
 const PENDING_KEY = 'discador_evs_resultado_pendente_v1';
+const SYNC_QUEUE_KEY = 'discador_evs_resultados_sync_v1';
 const OUTBOX_KEY = 'discador_evs_kabam_outbox_v1';
 
 const RESULTADOS = [
@@ -122,12 +123,16 @@ export default function DiscadorEVS() {
   const [leads, setLeads] = useState([]);
   const [salvando, setSalvando] = useState(false);
   const [pendente, setPendente] = useState(null);
+  const [syncPendentes, setSyncPendentes] = useState([]);
+  const [syncErro, setSyncErro] = useState('');
   const [deviceRetry, setDeviceRetry] = useState(0);
   const leadsRef = useRef([]);
   const registrarRef = useRef(null);
   const chamarRef = useRef(null);
   const saveRef = useRef(false);
   const pendingRef = useRef(null);
+  const syncRef = useRef([]);
+  const syncingRef = useRef(false);
   const dialingRef = useRef(false);
   const [activeId, setActiveId] = useState(null);
   const [historico, setHistorico] = useState([]);
@@ -201,18 +206,73 @@ export default function DiscadorEVS() {
   }, [historico, hoje, filaElegivel]);
 
   useEffect(() => {
-    const saved = safeStorageRead(PENDING_KEY, null);
-    if (saved?.payload?.event_id && saved?.lead) {
-      pendingRef.current = saved;
-      setPendente(saved);
-      setActiveId(saved.lead.id);
-      setEstado('wrapup');
-      setErro('Há um resultado pendente. Salve novamente antes de continuar.');
+    const antigos = safeStorageRead(SYNC_QUEUE_KEY, []);
+    const fila = Array.isArray(antigos) ? antigos.filter((item) => item?.payload?.event_id) : [];
+    const legado = safeStorageRead(PENDING_KEY, null);
+    if (legado?.payload?.event_id && legado?.lead && !fila.some((item) => item.payload.event_id === legado.payload.event_id)) {
+      fila.unshift(legado);
     }
+    syncRef.current = fila;
+    setSyncPendentes(fila);
+    safeStorageWrite(SYNC_QUEUE_KEY, fila);
+    safeStorageWrite(PENDING_KEY, null);
+    pendingRef.current = null;
+    setPendente(null);
   }, []);
 
   useEffect(() => { setKabamOutbox(safeStorageRead(OUTBOX_KEY, [])); }, []);
   useEffect(() => { safeStorageWrite(OUTBOX_KEY, kabamOutbox); }, [kabamOutbox]);
+
+  const atualizarFilaSync = (fila) => {
+    syncRef.current = fila;
+    setSyncPendentes(fila);
+    safeStorageWrite(SYNC_QUEUE_KEY, fila);
+  };
+
+  const enfileirarSincronizacao = (saved) => {
+    const atual = syncRef.current || [];
+    if (atual.some((item) => item?.payload?.event_id === saved?.payload?.event_id)) return;
+    atualizarFilaSync([...atual, saved]);
+  };
+
+  async function sincronizarPendentes() {
+    if (syncingRef.current || !(syncRef.current || []).length) return;
+    syncingRef.current = true;
+    setSyncErro('');
+
+    try {
+      while ((syncRef.current || []).length) {
+        const item = syncRef.current[0];
+        const response = await fetch('/api/ligacoes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(30000),
+          body: JSON.stringify(item.payload),
+        });
+
+        if (response.status === 401) {
+          window.location.assign('/login');
+          return;
+        }
+
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || body.error) throw new Error(body.error || 'Não foi possível sincronizar o resultado.');
+
+        atualizarFilaSync(syncRef.current.filter((saved) => saved?.payload?.event_id !== item?.payload?.event_id));
+      }
+    } catch (error) {
+      setSyncErro(mensagemErro(error, 'A sincronização com a Base_Geral será tentada novamente.'));
+    } finally {
+      syncingRef.current = false;
+    }
+  }
+
+  useEffect(() => {
+    if (!syncPendentes.length) return undefined;
+    const primeiro = setTimeout(() => sincronizarPendentes(), 1200);
+    const intervalo = setInterval(() => sincronizarPendentes(), 10000);
+    return () => { clearTimeout(primeiro); clearInterval(intervalo); };
+  }, [syncPendentes.length]);
 
 
   const carregarDados = async ({ silencioso = false } = {}) => {
@@ -577,12 +637,17 @@ export default function DiscadorEVS() {
     };
     pendingRef.current = saved;
     setPendente(saved);
+    safeStorageWrite(PENDING_KEY, saved);
+
+    let body = {};
+    let sincronizadoAgora = false;
     try {
-      window.localStorage.setItem(PENDING_KEY, JSON.stringify(saved));
       const response = await fetch('/api/ligacoes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(25000),
+        // A operação da vendedora não fica presa à latência do Apps Script.
+        // Se não confirmar rápido, o resultado entra na fila local e é reenviado em segundo plano.
+        signal: AbortSignal.timeout(1200),
         body: JSON.stringify(saved.payload),
       });
       if (response.status === 401) {
@@ -591,61 +656,60 @@ export default function DiscadorEVS() {
         return;
       }
 
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || body.error) {
-        throw new Error(body.error || 'Não foi possível salvar o resultado.');
-      }
-
-      const entrada = normalizarLigacao({
-        id: body.ligacao?.id || 'local-' + Date.now(),
-        lead_id: leadAtual.id,
-        resultado,
-        duracao_seg: duracaoAtual,
-        nota: notaLimpa,
-        tentativa,
-        created_at: body.ligacao?.created_at || new Date().toISOString(),
-      });
-
-      setHistorico((atual) => [entrada, ...atual]);
-
-      if (notaLimpa) {
-        const payload = body.kabam || {
-          evento: 'discador.comentario',
-          versao: 1,
-          status: 'pendente',
-          sincronizado: false,
-          id_evento: entrada.id,
-          id_lead: leadAtual.id,
-          nome: leadAtual.nome,
-          telefone: leadAtual.telefone,
-          comentario: notaLimpa,
-          resultado,
-          duracao_segundos: duracaoAtual,
-          data_hora: entrada.created_at,
-          proxima_acao: proximaAcao,
-          data_retorno: dataRetorno,
-          data_agendamento: dataAgendamento,
-          origem: 'Discador EVS',
-          destino: 'Kabam / BotConversa',
-        };
-
-        setKabamOutbox((outbox) => [payload, ...outbox]);
-        emitirComentarioKabam(payload);
-      }
+      body = await response.json().catch(() => ({}));
+      if (!response.ok || body.error) throw new Error(body.error || 'Não foi possível salvar o resultado.');
+      sincronizadoAgora = true;
     } catch (error) {
-      pausarAutomatico();
-      setActiveId(leadAtual.id);
-      setEstado('wrapup');
-      setErro(mensagemErro(error, 'Não foi possível salvar o resultado.'));
-      return;
+      enfileirarSincronizacao(saved);
+      setSyncErro('Resultado guardado neste navegador. A Base_Geral será sincronizada em segundo plano.');
     } finally {
+      pendingRef.current = null;
+      setPendente(null);
+      safeStorageWrite(PENDING_KEY, null);
       saveRef.current = false;
       setSalvando(false);
     }
 
-    pendingRef.current = null;
-    setPendente(null);
-    safeStorageWrite(PENDING_KEY, null);
+    const entrada = normalizarLigacao({
+      id: body.ligacao?.id || saved.payload.event_id,
+      lead_id: leadAtual.id,
+      resultado,
+      duracao_seg: duracaoAtual,
+      nota: notaLimpa,
+      tentativa,
+      created_at: body.ligacao?.created_at || new Date().toISOString(),
+    });
+
+    setHistorico((atual) => atual.some((item) => String(item.id) === String(entrada.id)) ? atual : [entrada, ...atual]);
+
+    if (notaLimpa) {
+      const payload = body.kabam || {
+        evento: 'discador.comentario',
+        versao: 1,
+        status: 'pendente',
+        sincronizado: false,
+        id_evento: entrada.id,
+        id_lead: leadAtual.id,
+        nome: leadAtual.nome,
+        telefone: leadAtual.telefone,
+        comentario: notaLimpa,
+        resultado,
+        duracao_segundos: duracaoAtual,
+        data_hora: entrada.created_at,
+        proxima_acao: proximaAcao,
+        data_retorno: dataRetorno,
+        data_agendamento: dataAgendamento,
+        origem: 'Discador EVS',
+        destino: 'Kabam / BotConversa',
+      };
+
+      setKabamOutbox((outbox) => [payload, ...outbox]);
+      emitirComentarioKabam(payload);
+    }
+
+    if (sincronizadoAgora) {
+      setSyncErro('');
+    }
     setErro('');
     const novoStatus = atingiuLimite ? 'limite_tentativas' : configuracao.status;
     const leadsAtualizados = leadsRef.current.map((item) => (
@@ -804,13 +868,7 @@ export default function DiscadorEVS() {
   };
 
   registrarRef.current = registrar;
-  const repetirSalvamento = () => {
-    const saved = pendingRef.current;
-    if (!saved) return;
-    return registrar(saved.payload.resultado, saved.lead, {
-      duracao_seg: saved.payload.duracao_seg, nota: saved.payload.nota,
-    });
-  };
+  const repetirSalvamento = () => sincronizarPendentes();
 
   return (
     <div className="app-shell">
@@ -824,7 +882,7 @@ export default function DiscadorEVS() {
 
       {erro && <div className="alert-error">{erro}</div>}
       {!pronto && estado === 'idle' && <button className="btn-secondary" onClick={() => { setPronto(false); setDeviceRetry((n) => n + 1); }}>Reconectar telefone</button>}
-      {pendente && <div className="alert-error">Resultado pendente de salvamento. <button className="btn-secondary" disabled={salvando} onClick={repetirSalvamento}>{salvando ? 'Salvando…' : 'Salvar novamente'}</button></div>}
+      {syncPendentes.length > 0 && <div className="sync-notice"><strong>{syncPendentes.length} resultado(s) aguardando sincronização.</strong> O discador continua liberado. <button className="btn-secondary" onClick={repetirSalvamento}>Tentar sincronizar agora</button>{syncErro && <span>{syncErro}</span>}</div>}
       <div className="workspace">
         <aside className="queue-panel"><div className="queue-head"><span>Fila de hoje</span><strong>{filaVisivel.length}</strong></div><div className="queue-filters"><input value={busca} onChange={(event) => setBusca(event.target.value)} placeholder="Buscar nome, telefone ou negócio" aria-label="Buscar lead" /><select value={filtroFila} onChange={(event) => setFiltroFila(event.target.value)} aria-label="Filtrar fila"><option value="todos">Todos elegíveis</option><option value="retornos">Retornos primeiro</option><option value="novos">Novos leads</option></select></div><div className="queue-list scroll-area">{filaVisivel.map((item) => { const ativo = String(item.id) === String(lead?.id); return <button key={item.id} className={`queue-item ${ativo ? 'selected' : ''}`} onClick={() => estado === 'idle' && setActiveId(item.id)} disabled={estado !== 'idle'}><div className="queue-avatar">{iniciais(item.nome)}</div><div className="queue-copy"><div className="queue-name">{item.nome}</div><div className="queue-business">{item.negocio || 'Negócio não informado'}</div></div>{item.status === 'retornar' && <span className="return-badge">{item.dataRetorno ? fmtDataCurta(item.dataRetorno) : 'retornar'}</span>}</button>; })}{!filaVisivel.length && <div className="empty-state">Nenhum lead elegível nessa visão.</div>}</div></aside>
 
