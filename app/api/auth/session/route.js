@@ -5,7 +5,7 @@ import { SESSION_COOKIE, verifySessionToken } from '@/lib/auth';
 export const runtime = 'nodejs';
 
 export async function GET() {
-  const token = cookies().get(SESSION_COOKIE)?.value;
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
   const session = await verifySessionToken(token);
 
   return NextResponse.json({
